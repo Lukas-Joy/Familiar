@@ -1,0 +1,18 @@
+{
+  "name": "psx-familiar",
+  "version": "0.1.0",
+  "description": "A 3D WebGL virtual familiar companion website",
+  "main": "index.html",
+  "scripts": {
+    "dev": "echo 'Open index.html with VS Code Live Server"
+  },
+  "keywords": [
+    "webgl",
+    "three.js",
+    "psx",
+    "virtual-pet",
+    "3d"
+  ],
+  "author": "Lukas Joy",
+  "license": "MIT"
+}

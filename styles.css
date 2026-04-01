@@ -1,0 +1,144 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Arial', sans-serif;
+    overflow: hidden;
+    background-color: #000;
+}
+
+#scene-container {
+    width: 100vw;
+    height: 100vh;
+    display: block;
+}
+
+canvas {
+    display: block;
+}
+
+#stats-panel {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background-color: rgba(0, 0, 0, 0.9);
+    border: 2px solid #fff;
+    border-radius: 8px;
+    padding: 16px;
+    font-family: 'Arial', sans-serif;
+    font-size: 14px;
+    color: #fff;
+    z-index: 1000;
+    width: 220px;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
+}
+
+#stats-panel h3 {
+    margin: 0 0 12px 0;
+    text-align: center;
+    font-size: 16px;
+    color: #ffb6c1;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.state-badge {
+    text-align: center;
+    padding: 6px 10px;
+    margin-bottom: 12px;
+    background-color: rgba(100, 100, 100, 0.5);
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #aaa;
+    transition: all 0.2s ease;
+}
+
+.state-badge.idle {
+    background-color: rgba(76, 175, 80, 0.3);
+    color: #81C784;
+}
+
+.state-badge.tired {
+    background-color: rgba(255, 193, 7, 0.3);
+    color: #FFD54F;
+}
+
+.state-badge.hungry {
+    background-color: rgba(244, 67, 54, 0.3);
+    color: #EF5350;
+}
+
+.state-badge.going_to_food {
+    background-color: rgba(255, 152, 0, 0.3);
+    color: #FFB74D;
+}
+
+.state-badge.eating {
+    background-color: rgba(255, 152, 0, 0.3);
+    color: #FFB74D;
+}
+
+.state-badge.sleeping {
+    background-color: rgba(156, 39, 176, 0.3);
+    color: #CE93D8;
+}
+
+.state-badge.playing {
+    background-color: rgba(233, 30, 99, 0.3);
+    color: #F48FB1;
+}
+
+.stat {
+    margin-bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.stat label {
+    display: flex;
+    justify-content: space-between;
+    font-weight: bold;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.stat span {
+    font-size: 11px;
+    color: #aaa;
+}
+
+.stat-bar {
+    width: 100%;
+    height: 12px;
+    background-color: rgba(100, 100, 100, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.stat-fill {
+    height: 100%;
+    width: 50%;
+    background: linear-gradient(90deg, #4CAF50, #81C784);
+    transition: width 0.1s ease;
+}
+
+#hunger-fill {
+    background: linear-gradient(90deg, #FF6B6B, #FF9999);
+}
+
+#energy-fill {
+    background: linear-gradient(90deg, #FFD700, #FFED4E);
+}
+
+#excitement-fill {
+    background: linear-gradient(90deg, #9C27B0, #E91E63);
+}
