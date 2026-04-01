@@ -94,6 +94,21 @@ canvas {
     color: #F48FB1;
 }
 
+.state-badge.bored {
+    background-color: rgba(103, 58, 183, 0.3);
+    color: #9575CD;
+}
+
+.state-badge.playing_fetch {
+    background-color: rgba(233, 30, 99, 0.3);
+    color: #F48FB1;
+}
+
+.state-badge.playing_hide_and_seek {
+    background-color: rgba(233, 30, 99, 0.3);
+    color: #F48FB1;
+}
+
 .stat {
     margin-bottom: 12px;
     display: flex;
