@@ -1,19 +1,34 @@
 // Scene setup
 const scene = new THREE.Scene();
 const container = document.getElementById('scene-container');
-const width = window.innerWidth;
-const height = window.innerHeight;
+const windowWidth = window.innerWidth;
+const windowHeight = window.innerHeight;
+
+// Internal render resolution (480p)
+const renderWidth = 854;  // 480p width (16:9 aspect)
+const renderHeight = 480; // 480p height
 
 // Camera - Top-down view with 45 degree downward tilt
-const camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(75, renderWidth / renderHeight, 0.1, 1000);
 camera.position.set(0, 12, 12);
 camera.lookAt(0, 0, 0);
 
-// Renderer
+// Renderer - full window size
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(width, height);
+renderer.setSize(windowWidth, windowHeight);
 renderer.setClearColor(0x87ceeb); // Sky blue
 container.appendChild(renderer.domElement);
+
+// Create render target for 480p resolution
+const renderTarget = new THREE.WebGLRenderTarget(renderWidth, renderHeight);
+
+// Create display camera and scene for showing render target
+const displayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const displayScene = new THREE.Scene();
+const displayGeometry = new THREE.PlaneGeometry(2, 2);
+const displayMaterial = new THREE.MeshBasicMaterial({ map: renderTarget.texture });
+const displayQuad = new THREE.Mesh(displayGeometry, displayMaterial);
+displayScene.add(displayQuad);
 
 // Lighting
 const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -84,7 +99,7 @@ const mouse = new THREE.Vector2();
 const toyGeom = new THREE.BoxGeometry(0.6, 0.4, 0.6);
 const toyMat = new THREE.MeshStandardMaterial({ color: 0xFF1493 });
 const toy = new THREE.Mesh(toyGeom, toyMat);
-const toyStartPosition = new THREE.Vector3(0, 0.3, -5); // Original position
+const toyStartPosition = new THREE.Vector3(0, 0.3, 5); // Original position - in front of creature
 toy.position.copy(toyStartPosition);
 scene.add(toy);
 
@@ -181,6 +196,7 @@ window.addEventListener('mousedown', (event) => {
             creature.playSubstate = 'hide_and_seek';
             creature.isHiding = false;
             creature.atCenter = false;
+            creature.removeTargetIndicator();
             // Randomly select a hide spot
             selectedHideSpot = hideSpots[Math.floor(Math.random() * hideSpots.length)];
             return;
@@ -218,12 +234,51 @@ window.addEventListener('mouseup', () => {
     if (isDraggingToy && creature.actionState === 'bored' && creature.atCenter) {
         creature.actionState = 'playing_fetch';
         creature.playSubstate = 'fetch';
+        creature.removeTargetIndicator();
         creature.hasToy = false;
     }
     
     isDraggingToy = false;
     mouseDown = false;
 });
+// Load LittleGuy model
+let modelMesh = null;
+let animationMixer = null;
+let idleAction = null;
+let walkAction = null;
+let currentAnimation = null;
+
+const loader = new THREE.GLTFLoader();
+loader.load('assets/models/Roach.glb', (gltf) => {
+    modelMesh = gltf.scene;
+    modelMesh.position.y = 0;
+    scene.add(modelMesh);
+    
+    // Hide the cube fallback since model loaded
+    cube.visible = false;
+    
+    // Set up animation mixer
+    animationMixer = new THREE.AnimationMixer(modelMesh);
+    
+    // Get animation clips
+    const animations = gltf.animations;
+    idleAction = animationMixer.clipAction(THREE.AnimationClip.findByName(animations, 'IDLE'));
+    walkAction = animationMixer.clipAction(THREE.AnimationClip.findByName(animations, 'WALK'));
+    
+    // Set up animations
+    if (idleAction) {
+        idleAction.loop = THREE.LoopRepeat;
+        idleAction.clampWhenFinished = false;
+        idleAction.play();
+        currentAnimation = 'idle';
+    }
+    if (walkAction) {
+        walkAction.loop = THREE.LoopRepeat;
+        walkAction.clampWhenFinished = false;
+    }
+});
+
+// Fallback cube if model doesn't load
 const cubeGeometry = new THREE.BoxGeometry(1, 1, 1);
 const cubeMaterial = new THREE.MeshStandardMaterial({ color: 0xff6b6b });
 const cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
@@ -232,14 +287,31 @@ scene.add(cube);
 
 // Creature AI - Pathfinding, Stats, and State System
 const creature = {
-    mesh: cube,
+    mesh: modelMesh || cube,
     velocity: new THREE.Vector3(0, 0, 0),
+    previousPosition: new THREE.Vector3(0, 0.5, 0),
     speed: 3, // units per second
     targetPosition: new THREE.Vector3(0, 0.5, 0),
-    stoppingDistance: 0.5,
+    stoppingDistance: 1.5, // Increased so creature doesn't need exact spot
     bedCloseDistance: 1, // How close to bed before "at bed"
     dispenserCloseDistance: 1.2, // How close to dispenser before "at dispenser"
     foodCloseDistance: 0.8, // How close to food before eating
+    
+    // Animation tracking
+    isMoving: false,
+    lastAnimationState: null,
+    
+    // Rotation tracking
+    currentRotationY: 0, // Track current rotation for smooth turning
+    maxTurnRate: Math.PI * 0.5, // Radians per second (360 degrees/sec for smooth curves)
+    
+    // Target indicator (visual cube)
+    targetIndicator: null,
+    
+    // Idle pause timing
+    pauseTimer: 0,
+    pauseDuration: 0,
+    isPaused: false,
     
     // Current action state
     actionState: 'idle', // idle, bored, hungry, eating, sleeping, playing_fetch, playing_hide_and_seek
@@ -292,6 +364,117 @@ const creature = {
         this.mesh.position.x = Math.max(this.groundBounds.minX + margin, Math.min(this.groundBounds.maxX - margin, this.mesh.position.x));
         this.mesh.position.z = Math.max(this.groundBounds.minZ + margin, Math.min(this.groundBounds.maxZ - margin, this.mesh.position.z));
     },
+    
+    // Update animation based on actual velocity
+    updateAnimation() {
+        // Use actual velocity magnitude to determine animation
+        const velocityMagnitude = this.velocity.length();
+        const movementThreshold = 0.1; // Threshold for considering creature "moving"
+        
+        // Determine target animation based on actual movement
+        const targetAnimation = velocityMagnitude > movementThreshold ? 'walk' : 'idle';
+        
+        // Only switch animation if the target is different from current
+        if (targetAnimation !== currentAnimation && walkAction && idleAction) {
+            if (targetAnimation === 'walk') {
+                // Only switch if not already walking
+                if (currentAnimation !== 'walk') {
+                    idleAction.stop();
+                    idleAction.fadeOut(0.15);
+                    walkAction.reset();
+                    walkAction.play();
+                    walkAction.fadeIn(0.15);
+                    currentAnimation = 'walk';
+                }
+            } else {
+                // Only switch if not already idle
+                if (currentAnimation !== 'idle') {
+                    walkAction.stop();
+                    walkAction.fadeOut(0.15);
+                    idleAction.reset();
+                    idleAction.play();
+                    idleAction.fadeIn(0.15);
+                    currentAnimation = 'idle';
+                }
+            }
+        }
+        
+        this.isMoving = velocityMagnitude > movementThreshold;
+    },
+    
+    // Update model rotation to face the target direction with turn rate limiting
+    updateRotation(deltaTime) {
+        if (!this.mesh) return;
+        
+        const direction = new THREE.Vector3().subVectors(this.targetPosition, this.mesh.position);
+        const distance = direction.length();
+        
+        // Always face toward target direction if there's a target to face
+        if (distance > 0.01) {
+            direction.normalize();
+            // Calculate desired angle to face target (ignore Y, only XZ plane)
+            // Add Math.PI to flip the model so front faces forward instead of backwards
+            const desiredAngle = Math.atan2(direction.x, direction.z) + Math.PI;
+            
+            // Limit turn rate for smooth curves instead of snapping
+            let angleDifference = desiredAngle - this.currentRotationY;
+            
+            // Handle angle wrapping (shortest path around the circle)
+            while (angleDifference > Math.PI) angleDifference -= Math.PI * 2;
+            while (angleDifference < -Math.PI) angleDifference += Math.PI * 2;
+            
+            // Determine effective turn rate based on conditions
+            let effectiveTurnRate = this.maxTurnRate;
+            
+            // If stationary, allow unlimited turning
+            if (this.velocity.length() < 0.1) {
+                effectiveTurnRate = Math.PI * 10; // Very high turn rate when stopped
+            } else {
+                // Check distance to edges - turn faster near edges to avoid getting stuck
+                const edgeMargin = 2.0; // How close to edge before emergency turning
+                const distToLeftEdge = this.mesh.position.x - this.groundBounds.minX;
+                const distToRightEdge = this.groundBounds.maxX - this.mesh.position.x;
+                const distToFrontEdge = this.mesh.position.z - this.groundBounds.minZ;
+                const distToBackEdge = this.groundBounds.maxZ - this.mesh.position.z;
+                
+                // Find minimum distance to any edge
+                const minEdgeDist = Math.min(distToLeftEdge, distToRightEdge, distToFrontEdge, distToBackEdge);
+                
+                // If near edge, increase turn rate proportionally
+                if (minEdgeDist < edgeMargin) {
+                    const edgeFactor = 1 + (1 - minEdgeDist / edgeMargin) * 3; // Up to 4x faster near edges
+                    effectiveTurnRate = this.maxTurnRate * edgeFactor;
+                }
+            }
+            
+            // Clamp to effective turn rate
+            const maxTurnThisFrame = effectiveTurnRate * deltaTime;
+            angleDifference = Math.max(-maxTurnThisFrame, Math.min(maxTurnThisFrame, angleDifference));
+            
+            // Update current rotation
+            this.currentRotationY += angleDifference;
+            this.mesh.rotation.y = this.currentRotationY;
+        }
+    },
+    
+    // Reapply rotation after animation mixer updates to override animation keyframes
+    finalizeRotation() {
+        if (!this.mesh) return;
+        this.mesh.rotation.y = this.currentRotationY;
+    },
+    
+    // Move forward in the direction the model is currently facing
+    moveForward(deltaTime) {
+        // Model is rotated by an extra π, so negate the forward vector
+        // In world space after rotation by rotation.y (with +π offset):
+        // (-sin(rotation.y), 0, -cos(rotation.y)) is the forward direction
+        const forwardX = -Math.sin(this.currentRotationY);
+        const forwardZ = -Math.cos(this.currentRotationY);
+        
+        this.mesh.position.x += forwardX * this.speed * deltaTime;
+        this.mesh.position.z += forwardZ * this.speed * deltaTime;
+    },
+    
     evaluateState() {
         // If currently sleeping, stay sleeping until fully rested
         if (this.actionState === 'sleeping') {
@@ -405,13 +588,47 @@ const creature = {
     
     // Pick a new random target within the ground bounds
     pickNewTarget() {
-        this.targetPosition.x = THREE.MathUtils.randFloat(this.groundBounds.minX + 1, this.groundBounds.maxX - 1);
-        this.targetPosition.z = THREE.MathUtils.randFloat(this.groundBounds.minZ + 1, this.groundBounds.maxZ - 1);
+        this.targetPosition.x = THREE.MathUtils.randFloat(this.groundBounds.minX + 1.5, this.groundBounds.maxX - 1.5);
+        this.targetPosition.z = THREE.MathUtils.randFloat(this.groundBounds.minZ + 1.5, this.groundBounds.maxZ - 1.5);
         this.targetPosition.y = 0.5;
+        // Clamp to ensure target is always within bounds
+        this.targetPosition.x = Math.max(this.groundBounds.minX + 1, Math.min(this.groundBounds.maxX - 1, this.targetPosition.x));
+        this.targetPosition.z = Math.max(this.groundBounds.minZ + 1, Math.min(this.groundBounds.maxZ - 1, this.targetPosition.z));
+        
+        // Spawn target indicator cube
+        this.spawnTargetIndicator();
+    },
+    
+    // Spawn a visual cube at the target position
+    spawnTargetIndicator() {
+        // Remove old indicator if it exists
+        if (this.targetIndicator) {
+            scene.remove(this.targetIndicator);
+        }
+        
+        // Create new indicator cube
+        const indicatorGeom = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+        const indicatorMat = new THREE.MeshStandardMaterial({ color: 0x00FF00, emissive: 0x00AA00 });
+        this.targetIndicator = new THREE.Mesh(indicatorGeom, indicatorMat);
+        this.targetIndicator.position.copy(this.targetPosition);
+        this.targetIndicator.position.y = 0.25; // Half height so bottom sits on ground
+        scene.add(this.targetIndicator);
+    },
+    
+    // Remove the target indicator cube
+    removeTargetIndicator() {
+        if (this.targetIndicator) {
+            scene.remove(this.targetIndicator);
+            this.targetIndicator = null;
+        }
     },
     
     // Update movement toward target, stats, and state
     update(deltaTime) {
+        // Calculate actual velocity based on position change
+        this.velocity.copy(this.mesh.position).sub(this.previousPosition).divideScalar(Math.max(deltaTime, 0.001));
+        this.previousPosition.copy(this.mesh.position);
+        
         this.stateTimer += deltaTime;
         
         // Apply base stat decay
@@ -451,6 +668,16 @@ const creature = {
             this.atBed = false;
             this.atDispenser = false;
             this.atFood = false;
+            
+            // Update target position when transitioning to bored
+            if (desiredState === 'bored') {
+                this.targetPosition.set(0, 0.5, 0);
+            }
+            
+            // Remove target indicator when transitioning away from idle
+            if (desiredState !== 'idle' && desiredState !== 'bored') {
+                this.removeTargetIndicator();
+            }
         }
         
         // Handle movement based on state
@@ -458,6 +685,9 @@ const creature = {
             // Pathfind to bed
             if (!this.atBed) {
                 this.targetPosition.copy(bedPosition);
+                // Clamp to ensure target is within bounds
+                this.targetPosition.x = Math.max(this.groundBounds.minX + 1, Math.min(this.groundBounds.maxX - 1, this.targetPosition.x));
+                this.targetPosition.z = Math.max(this.groundBounds.minZ + 1, Math.min(this.groundBounds.maxZ - 1, this.targetPosition.z));
             }
             
             const distanceToBed = this.mesh.position.distanceTo(bedPosition);
@@ -465,15 +695,12 @@ const creature = {
                 this.atBed = true;
                 // Automatically transition to sleeping when at bed
                 this.actionState = 'sleeping';
+                this.removeTargetIndicator();
             }
             
             // Move toward bed
             if (!this.atBed) {
-                const direction = new THREE.Vector3().subVectors(bedPosition, this.mesh.position);
-                if (direction.length() > 0) {
-                    direction.normalize();
-                    this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                }
+                this.moveForward(deltaTime);
             }
         } else if (this.actionState === 'sleeping') {
             // Already at bed, just stay there and recover
@@ -482,6 +709,9 @@ const creature = {
             // Pathfind to dispenser
             if (!this.atDispenser) {
                 this.targetPosition.copy(dispenserPosition);
+                // Clamp to ensure target is within bounds
+                this.targetPosition.x = Math.max(this.groundBounds.minX + 1, Math.min(this.groundBounds.maxX - 1, this.targetPosition.x));
+                this.targetPosition.z = Math.max(this.groundBounds.minZ + 1, Math.min(this.groundBounds.maxZ - 1, this.targetPosition.z));
             }
             
             const distanceToDispenser = this.mesh.position.distanceTo(dispenserPosition);
@@ -492,11 +722,7 @@ const creature = {
             
             // Move toward dispenser
             if (!this.atDispenser) {
-                const direction = new THREE.Vector3().subVectors(dispenserPosition, this.mesh.position);
-                if (direction.length() > 0) {
-                    direction.normalize();
-                    this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                }
+                this.moveForward(deltaTime);
             }
             
             // Once at dispenser and food is available, transition to going_to_food
@@ -516,13 +742,10 @@ const creature = {
                     // Automatically transition to eating when at food
                     this.actionState = 'eating';
                     this.eatingTimer = 0;
+                    this.removeTargetIndicator();
                 } else {
                     // Move toward food
-                    const direction = new THREE.Vector3().subVectors(foodPos, this.mesh.position);
-                    if (direction.length() > 0) {
-                        direction.normalize();
-                        this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                    }
+                    this.moveForward(deltaTime);
                 }
             }
         } else if (this.actionState === 'eating') {
@@ -548,6 +771,7 @@ const creature = {
         } else if (this.actionState === 'bored') {
             // Pathfind to center to wait for play
             const centerPos = new THREE.Vector3(0, 0.5, 0);
+            this.targetPosition.copy(centerPos); // Update target position to center
             const distanceToCenter = this.mesh.position.distanceTo(centerPos);
             
             if (distanceToCenter < this.stoppingDistance) {
@@ -555,88 +779,70 @@ const creature = {
                 // Stop moving, wait for player to choose fetch or hide-and-seek
             } else {
                 // Move toward center
-                const direction = new THREE.Vector3().subVectors(centerPos, this.mesh.position);
-                if (direction.length() > 0) {
-                    direction.normalize();
-                    this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                }
+                this.moveForward(deltaTime);
             }
         } else if (this.actionState === 'playing_fetch') {
-            // Fetch gameplay
+            // Fetch gameplay - creature fetches toy from ANY distance
+            // Gain excitement while actively fetching
+            this.stats.excitement = this.clampStat(this.stats.excitement + 5 * deltaTime);
+            
             if (this.hasToy) {
                 // Carry toy back to original starting position
                 const toyReturnPos = new THREE.Vector3().copy(toyStartPosition);
                 toyReturnPos.y = 0.5; // Creature height
+                this.targetPosition.copy(toyReturnPos); // Update target for rotation
                 const distanceToReturn = this.mesh.position.distanceTo(toyReturnPos);
                 
                 if (distanceToReturn < this.stoppingDistance) {
-                    // Reached return position, drop toy
+                    // Reached return position, drop toy and get bonus
                     this.hasToy = false;
                     toy.position.copy(toyStartPosition);
-                    // Continue playing or check if play should end
+                    this.stats.excitement = this.clampStat(this.stats.excitement + 20); // Bonus for returning
                 } else {
                     // Move toward return position with toy
-                    const direction = new THREE.Vector3().subVectors(toyReturnPos, this.mesh.position);
-                    if (direction.length() > 0) {
-                        direction.normalize();
-                        this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                    }
+                    this.moveForward(deltaTime);
                 }
             } else {
-                // Chase toy if it exists and is within ground bounds
+                // Chase toy no matter the distance
                 const toyDist = this.mesh.position.distanceTo(toy.position);
                 const toyPos = toy.position.clone();
                 toyPos.y = 0.5;
+                this.targetPosition.copy(toyPos); // Update target for rotation toward toy
                 
-                // Always chase toy if nearby (within 15 units)
-                if (toyDist < 15) {
-                    // Chase toy
-                    const direction = new THREE.Vector3().subVectors(toyPos, this.mesh.position);
-                    if (direction.length() > 0) {
-                        direction.normalize();
-                        this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                    }
-                    
-                    // If reached toy, pick it up
-                    if (toyDist < this.stoppingDistance) {
-                        this.hasToy = true;
-                    }
+                // Always chase toy
+                this.moveForward(deltaTime);
+                
+                // If reached toy, pick it up
+                if (toyDist < this.stoppingDistance) {
+                    this.hasToy = true;
                 }
             }
             
-            // End play if energy gets too low or 30+ seconds have passed
+            // End play if energy gets too low or 40+ seconds have passed
             this.playingTimer += deltaTime;
-            if (this.stats.energy <= 30 || this.playingTimer > 30) {
+            if (this.stats.energy <= 20 || this.playingTimer > 40) {
                 this.hasToy = false;
                 this.atCenter = false;
                 this.playingTimer = 0;
                 toy.position.copy(toyStartPosition); // Return toy to start if abandoned
                 
-                // 50% chance to go to bored state, 50% to go to idle
-                if (Math.random() < 0.5) {
-                    this.actionState = 'bored';
-                    this.stats.excitement = Math.max(0, this.stats.excitement - 15);
-                } else {
-                    this.actionState = 'idle';
-                    this.pickNewTarget();
-                }
+                // End play and go to idle
+                this.actionState = 'idle';
+                this.pickNewTarget();
             }
         } else if (this.actionState === 'playing_hide_and_seek') {
             // Hide and seek gameplay
             if (!this.atCenter) {
                 // First go to center if not there already
                 const centerPos = new THREE.Vector3(0, 0.5, 0);
+                this.targetPosition.copy(centerPos); // Update target for rotation
                 const distanceToCenter = this.mesh.position.distanceTo(centerPos);
                 
                 if (distanceToCenter < this.stoppingDistance) {
                     this.atCenter = true;
                 } else {
                     // Move toward center
-                    const direction = new THREE.Vector3().subVectors(centerPos, this.mesh.position);
-                    if (direction.length() > 0) {
-                        direction.normalize();
-                        this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                    }
+                    this.moveForward(deltaTime);
                     return; // Don't proceed to hiding until at center
                 }
             }
@@ -644,6 +850,7 @@ const creature = {
             if (!this.isHiding) {
                 // Pathfind to selected hide spot
                 if (selectedHideSpot) {
+                    this.targetPosition.copy(selectedHideSpot); // Update target for rotation toward hide spot
                     const distanceToHide = this.mesh.position.distanceTo(selectedHideSpot);
                     
                     if (distanceToHide < this.stoppingDistance + 1) { // Slightly larger tolerance
@@ -651,31 +858,27 @@ const creature = {
                         this.isHiding = true;
                     } else {
                         // Move toward hide spot
-                        const direction = new THREE.Vector3().subVectors(selectedHideSpot, this.mesh.position);
-                        if (direction.length() > 0) {
-                            direction.normalize();
-                            this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                        }
+                        this.moveForward(deltaTime);
                     }
                 }
             } else {
-                // Hiding and waiting to be found
+                // Hiding - gain excitement while hiding
+                this.stats.excitement = this.clampStat(this.stats.excitement + 3 * deltaTime);
+                
+                // Waiting to be found
                 if (this.foundByPlayer) {
-                    // Player found us! Boost excitement and return to center
-                    this.stats.excitement = this.clampStat(this.stats.excitement + 25);
+                    // Player found us! Large excitement bonus
+                    this.stats.excitement = this.clampStat(this.stats.excitement + 30);
                     this.isHiding = false;
                     this.foundByPlayer = false;
                     
                     const centerPos = new THREE.Vector3(0, 0.5, 0);
+                    this.targetPosition.copy(centerPos); // Update target for rotation back to center
                     const distanceToCenter = this.mesh.position.distanceTo(centerPos);
                     
                     if (distanceToCenter > this.stoppingDistance) {
                         // Move back to center
-                        const direction = new THREE.Vector3().subVectors(centerPos, this.mesh.position);
-                        if (direction.length() > 0) {
-                            direction.normalize();
-                            this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
-                        }
+                        this.moveForward(deltaTime);
                     } else {
                         // Back at center after being found
                         this.isHiding = false;
@@ -705,54 +908,71 @@ const creature = {
             
             // End play if energy gets too low or 40+ seconds have passed
             this.playingTimer += deltaTime;
-            if (this.stats.energy <= 30 || this.playingTimer > 40) {
+            if (this.stats.energy <= 20 || this.playingTimer > 40) {
                 this.isHiding = false;
                 this.foundByPlayer = false;
                 this.atCenter = false;
                 this.playingTimer = 0;
                 selectedHideSpot = null;
                 
-                // 50% chance to go to bored state, 50% to go to idle
-                if (Math.random() < 0.5) {
-                    this.actionState = 'bored';
-                    this.stats.excitement = Math.max(0, this.stats.excitement - 15);
-                } else {
-                    this.actionState = 'idle';
-                    this.pickNewTarget();
-                }
+                // End play and go to idle
+                this.actionState = 'idle';
+                this.pickNewTarget();
             }
         } else if (this.actionState !== 'eating') {
             // Idle still moves around
-            const direction = new THREE.Vector3().subVectors(this.targetPosition, this.mesh.position);
-            const distance = direction.length();
+            const distance = this.mesh.position.distanceTo(this.targetPosition);
             
             // Pick new target periodically or when reached current
-            if (distance < this.stoppingDistance || (this.actionState === 'playing' && Math.random() < 0.02)) {
-                this.pickNewTarget();
+            if (distance < this.stoppingDistance) {
+                // Reached target - start a pause
+                if (!this.isPaused) {
+                    this.isPaused = true;
+                    this.pauseTimer = 0;
+                    this.pauseDuration = Math.random() * 3; // 0-3 seconds
+                }
             }
             
-            // Move toward target
-            if (distance > 0) {
-                direction.normalize();
-                this.mesh.position.addScaledVector(direction, this.speed * deltaTime);
+            // Handle pause timing
+            if (this.isPaused) {
+                this.pauseTimer += deltaTime;
+                if (this.pauseTimer >= this.pauseDuration) {
+                    // Pause finished, pick new target
+                    this.isPaused = false;
+                    this.pauseTimer = 0;
+                    this.pickNewTarget();
+                }
+            }
+            
+            // Move forward in current direction only if not paused
+            if (!this.isPaused && distance > 0) {
+                this.moveForward(deltaTime);
             }
         }
         
         // Always keep creature within bounds
         this.clampPosition();
+        
+        // Update animations based on movement
+        this.updateAnimation();
+        
+        // Update rotation to face target direction with turn rate limiting
+        this.updateRotation(deltaTime);
     }
 };
 
 // Initialize with first target
 creature.pickNewTarget();
+creature.previousPosition.copy(creature.mesh.position);
+creature.currentRotationY = creature.mesh.rotation.y;
 
 // Handle window resize
 window.addEventListener('resize', () => {
-    const newWidth = window.innerWidth;
-    const newHeight = window.innerHeight;
-    camera.aspect = newWidth / newHeight;
+    const newWindowWidth = window.innerWidth;
+    const newWindowHeight = window.innerHeight;
+    camera.aspect = renderWidth / renderHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(newWidth, newHeight);
+    renderer.setSize(newWindowWidth, newWindowHeight);
 });
 
 // Animation loop
@@ -767,6 +987,19 @@ function animate() {
     
     // Update creature movement and stats
     creature.update(deltaTime);
+    
+    // Update animation mixer
+    if (animationMixer) {
+        animationMixer.update(deltaTime);
+    }
+    
+    // Reapply rotation AFTER mixer to override any animation rotation keyframes
+    creature.finalizeRotation();
+    
+    // Update mesh reference if model loaded
+    if (modelMesh && creature.mesh === cube) {
+        creature.mesh = modelMesh;
+    }
     
     // Update state display
     const stateDisplay = document.getElementById('state-display');
@@ -783,11 +1016,19 @@ function animate() {
     document.getElementById('excitement-fill').style.width = creature.stats.excitement + '%';
     document.getElementById('excitement-value').textContent = Math.round(creature.stats.excitement);
     
-    // Gentle rotation on the creature
-    creature.mesh.rotation.x += 0.01;
-    creature.mesh.rotation.y += 0.01;
+    // Gentle rotation on the creature (skip if using animated model)
+    if (!modelMesh) {
+        creature.mesh.rotation.x += 0.01;
+        creature.mesh.rotation.y += 0.01;
+    }
     
+    // Render scene to 480p render target
+    renderer.setRenderTarget(renderTarget);
     renderer.render(scene, camera);
+    
+    // Render the 480p render target to the full window
+    renderer.setRenderTarget(null);
+    renderer.render(displayScene, displayCamera);
 }
 
 let lastTime = 0;
