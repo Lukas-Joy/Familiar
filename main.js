@@ -5,7 +5,7 @@ const windowWidth = window.innerWidth;
 const windowHeight = window.innerHeight;
 
 // Internal render resolution (480p)
-const renderWidth = 854;  // 480p width (16:9 aspect)
+const renderWidth = 800;  // 480p width (16:9 aspect)
 const renderHeight = 480; // 480p height
 
 // Camera - Top-down view with 45 degree downward tilt
@@ -14,98 +14,443 @@ camera.position.set(0, 12, 12);
 camera.lookAt(0, 0, 0);
 
 // Renderer - full window size
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setSize(windowWidth, windowHeight);
+renderer.setPixelRatio(1); // Pixel perfect rendering
 renderer.setClearColor(0x87ceeb); // Sky blue
 container.appendChild(renderer.domElement);
 
 // Create render target for 480p resolution
 const renderTarget = new THREE.WebGLRenderTarget(renderWidth, renderHeight);
+// Apply nearest neighbor filtering to render target texture
+renderTarget.texture.magFilter = THREE.NearestFilter;
+renderTarget.texture.minFilter = THREE.NearestFilter;
 
 // Create display camera and scene for showing render target
 const displayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const displayScene = new THREE.Scene();
 const displayGeometry = new THREE.PlaneGeometry(2, 2);
 const displayMaterial = new THREE.MeshBasicMaterial({ map: renderTarget.texture });
+displayMaterial.magFilter = THREE.NearestFilter;
+displayMaterial.minFilter = THREE.NearestFilter;
 const displayQuad = new THREE.Mesh(displayGeometry, displayMaterial);
 displayScene.add(displayQuad);
 
-// Lighting
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-scene.add(ambientLight);
+// Load environment model (includes lighting from Blender scene)
+let environment = null;
+const envGltfLoader = new THREE.GLTFLoader();
+envGltfLoader.load('assets/models/env.glb', (gltf) => {
+    environment = gltf.scene;
+    console.log('Environment loaded:', environment);
+    
+    // Ensure all meshes in the GLB are visible
+    environment.traverse((child) => {
+        if (child.isMesh) {
+            child.visible = true;
+            child.castShadow = true;
+            child.receiveShadow = true;
+        }
+    });
+    
+    scene.add(environment);
+    console.log('Environment added to scene');
+}, undefined, (error) => {
+    console.error('Error loading environment:', error);
+});
 
-const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-directionalLight.position.set(10, 10, 5);
-scene.add(directionalLight);
+// Create 8 spotlights for repositioning
+const spotlights = [];
+const spotlightPositions = [
+    new THREE.Vector3(-6.90, 8.00, -6.40),
+    new THREE.Vector3(6.60, 8.00, -5.40),
+    new THREE.Vector3(-10.50, 8.00, 0.30),
+    new THREE.Vector3(7.50, 8.00, -0.50),
+    new THREE.Vector3(-8.30, 8.00, 3.40),
+    new THREE.Vector3(6.50, 8.00, 3.70),
+    new THREE.Vector3(-5.40, 8.00, 6.60),
+    new THREE.Vector3(4.80, 8.00, 5.00)
+];
 
-// Ground plane - hardcoded settings
-const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x90ee90 });
-const groundGeometry = new THREE.PlaneGeometry(27, 20);
-const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-ground.rotation.x = -Math.PI / 2;
-ground.position.set(0, 0, 0);
-scene.add(ground);
+for (let i = 0; i < 8; i++) {
+    const spotlight = new THREE.SpotLight(0xffffff, 0.4, 25, Math.PI / 2, 0.5, 1);
+    spotlight.position.copy(spotlightPositions[i]);
+    spotlight.target.position.set(spotlight.position.x, 0, spotlight.position.z);
+    spotlight.castShadow = true;
+    scene.add(spotlight);
+    scene.add(spotlight.target);
+    spotlights.push(spotlight);
+}
 
-// Bed (world object)
-const bedGroup = new THREE.Group();
-bedGroup.position.set(-10, 0, 8);
-scene.add(bedGroup);
-
-// Bed base
-const bedBaseGeom = new THREE.BoxGeometry(2, 0.2, 3);
-const bedBaseMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
-const bedBase = new THREE.Mesh(bedBaseGeom, bedBaseMat);
-bedBase.position.y = 0.1;
-bedGroup.add(bedBase);
-
-// Bed pillow
-const pillowGeom = new THREE.BoxGeometry(2, 0.3, 0.8);
-const pillowMat = new THREE.MeshStandardMaterial({ color: 0xFFB6C1 });
-const pillow = new THREE.Mesh(pillowGeom, pillowMat);
-pillow.position.set(0, 0.4, -0.9);
-bedGroup.add(pillow);
-
-// Store bed position for creature pathfinding
-const bedPosition = new THREE.Vector3(-10, 0.5, 8);
-
-// Food Dispenser (world object)
-const dispenserGroup = new THREE.Group();
-dispenserGroup.position.set(10, 0, 8);
-scene.add(dispenserGroup);
-
-// Dispenser body
-const dispenserBodyGeom = new THREE.BoxGeometry(1.2, 2, 1);
-const dispenserMat = new THREE.MeshStandardMaterial({ color: 0xFF6347 });
-const dispenserBody = new THREE.Mesh(dispenserBodyGeom, dispenserMat);
-dispenserBody.position.y = 1;
-dispenserGroup.add(dispenserBody);
-
-// Dispenser top
-const dispenserTopGeom = new THREE.ConeGeometry(0.8, 0.5, 8);
-const dispenserTop = new THREE.Mesh(dispenserTopGeom, dispenserMat);
-dispenserTop.position.y = 2.2;
-dispenserGroup.add(dispenserTop);
-
-// Store dispenser position and food state
-const dispenserPosition = new THREE.Vector3(10, 0.5, 8);
+// Store world positions for creature pathfinding
+let bedPosition = new THREE.Vector3(-12.10, 0.50, 8.90);
+let dispenserPosition = new THREE.Vector3(-9.50, 0.50, -10.10);
 let foodItem = null;
 let foodAvailable = false;
+
+// Debug mode for repositioning spotlights
+let debugMode = false;
+let selectedSpotlight = 0; // 0-7 for the 8 spotlights
+
+// Debug menu UI
+function createDebugMenu() {
+    const debugPanel = document.createElement('div');
+    debugPanel.id = 'debug-menu';
+    debugPanel.style.cssText = `
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        color: #0f0;
+        font-family: monospace;
+        padding: 15px;
+        border: 2px solid #0f0;
+        font-size: 12px;
+        line-height: 1.6;
+        max-width: 280px;
+        z-index: 1000;
+        display: none;
+    `;
+    
+    debugPanel.innerHTML = `
+        <div style="font-weight: bold; margin-bottom: 10px;">DEBUG MENU (D to toggle)</div>
+        <div style="margin-bottom: 8px;">
+            <div>Spotlight: <span id="spotlight-num">1</span>/8</div>
+            <div style="font-size: 10px; color: #0a0;">Press T to switch spotlight</div>
+        </div>
+        <div style="margin-bottom: 8px;">
+            <div>Position:</div>
+            <div>X: <span id="spot-x">0.00</span></div>
+            <div>Y: <span id="spot-y">8.00</span></div>
+            <div>Z: <span id="spot-z">0.00</span></div>
+        </div>
+        <div style="font-size: 10px; color: #0a0; margin-top: 10px;">
+            <div>Controls:</div>
+            <div>Arrow Keys / WASD: Move X/Z</div>
+            <div>Q/E: Move Y up/down</div>
+            <div>1/2: Adjust speed</div>
+            <div>C: Copy position to console</div>
+        </div>
+    `;
+    
+    document.body.appendChild(debugPanel);
+    return debugPanel;
+}
+
+let debugPanel = createDebugMenu();
+let debugMoveSpeed = 0.1;
+let keysPressed = {}
+
+document.getElementById('stats-panel').style.display = 'none';
+// ─── UI Overlay ───────────────────────────────────────────────────────────────
+const uiOverlay = document.createElement('img');
+uiOverlay.src = 'assets/UI.png';
+uiOverlay.id = 'ui-overlay';
+uiOverlay.style.cssText = `
+    position: fixed;
+    pointer-events: none;
+    z-index: 50;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: cover;
+`;
+document.body.appendChild(uiOverlay);
+
+// ─── Bar position + size state ────────────────────────────────────────────────
+const barConfigs = {
+    hunger:     { el: null, fillEl: null, x: 0, y: 0, w: 20, h: 120, label: 'Hunger Bar' },
+    energy:     { el: null, fillEl: null, x: 0, y: 0, w: 20, h: 120, label: 'Energy Bar' },
+    excitement: { el: null, fillEl: null, x: 0, y: 0, w: 20, h: 120, label: 'Excitement Bar' },
+};
+
+function initBarDebug() {
+    barConfigs.hunger.el        = document.getElementById('hunger-fill')?.closest('.stat-bar') || document.getElementById('hunger-fill')?.parentElement;
+    barConfigs.energy.el        = document.getElementById('energy-fill')?.closest('.stat-bar')  || document.getElementById('energy-fill')?.parentElement;
+    barConfigs.excitement.el    = document.getElementById('excitement-fill')?.closest('.stat-bar') || document.getElementById('excitement-fill')?.parentElement;
+    barConfigs.hunger.fillEl    = document.getElementById('hunger-fill');
+    barConfigs.energy.fillEl    = document.getElementById('energy-fill');
+    barConfigs.excitement.fillEl= document.getElementById('excitement-fill');
+}
+
+function applyBarOffsets() {
+    Object.values(barConfigs).forEach(cfg => {
+        if (!cfg.el) return;
+        cfg.el.style.position = 'relative';
+        cfg.el.style.left     = cfg.x + 'px';
+        cfg.el.style.top      = cfg.y + 'px';
+        cfg.el.style.width    = cfg.w + 'px';
+        cfg.el.style.height   = cfg.h + 'px';
+    });
+}
+
+// ─── Bar debug panel ──────────────────────────────────────────────────────────
+const barDebugPanel = document.createElement('div');
+barDebugPanel.id = 'bar-debug-panel';
+barDebugPanel.style.cssText = `
+    position: fixed;
+    bottom: 10px; right: 10px;
+    background: rgba(0,0,0,0.85);
+    color: #0ff;
+    font-family: monospace;
+    font-size: 11px;
+    padding: 12px 16px;
+    border: 1px solid #0ff;
+    z-index: 2000;
+    line-height: 1.8;
+    display: none;
+    min-width: 300px;
+`;
+
+barDebugPanel.innerHTML = `
+    <div style="font-weight:bold;margin-bottom:8px;">BAR DEBUG (B to toggle)</div>
+    ${['hunger','energy','excitement'].map(k => `
+    <div style="margin-bottom:8px;border-top:1px solid #044;padding-top:6px;">
+        <span style="color:#ff0;">${barConfigs[k].label}</span><br>
+        <span style="color:#888;font-size:10px;">Position</span><br>
+        X: <input id="bar-${k}-x" type="number" value="0" step="1"
+            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;">
+        Y: <input id="bar-${k}-y" type="number" value="0" step="1"
+            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;"><br>
+        <span style="color:#888;font-size:10px;">Size</span><br>
+        W: <input id="bar-${k}-w" type="number" value="20" step="1" min="4"
+            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;">
+        H: <input id="bar-${k}-h" type="number" value="120" step="1" min="10"
+            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;">
+        <button onclick="resetBar('${k}')"
+            style="background:#300;color:#f66;border:1px solid #f66;
+                   padding:1px 5px;cursor:pointer;margin-left:4px;">↺</button>
+    </div>`).join('')}
+    <div style="color:#888;font-size:10px;margin-top:6px;">
+        Arrow keys nudge selected bar position<br>
+        Shift+Arrow nudges size (W/H)<br>
+        Click any input to select that bar
+    </div>
+    <div style="margin-top:6px;">Selected: <span id="bar-selected-label" style="color:#ff0;">—</span></div>
+`;
+document.body.appendChild(barDebugPanel);
+
+let selectedBar = null;
+
+// Wire up all inputs
+['hunger','energy','excitement'].forEach(k => {
+    ['x','y','w','h'].forEach(prop => {
+        const inp = document.getElementById(`bar-${k}-${prop}`);
+        if (!inp) return;
+        inp.addEventListener('input', () => {
+            barConfigs[k][prop] = parseFloat(inp.value) || 0;
+            applyBarOffsets();
+        });
+        inp.addEventListener('click', () => {
+            selectedBar = k;
+            document.getElementById('bar-selected-label').textContent = barConfigs[k].label;
+        });
+    });
+});
+
+window.resetBar = function(k) {
+    barConfigs[k].x = 0; barConfigs[k].y = 0;
+    barConfigs[k].w = 20; barConfigs[k].h = 120;
+    document.getElementById(`bar-${k}-x`).value = 0;
+    document.getElementById(`bar-${k}-y`).value = 0;
+    document.getElementById(`bar-${k}-w`).value = 20;
+    document.getElementById(`bar-${k}-h`).value = 120;
+    applyBarOffsets();
+};
+
+// Arrow keys: plain = nudge position, Shift = nudge size
+window.addEventListener('keydown', (e) => {
+    if (barDebugPanel.style.display === 'none') return;
+    if (!selectedBar) return;
+    // Don't steal keys while typing in an input
+    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+
+    const step = 1;
+    const cfg = barConfigs[selectedBar];
+
+    if (e.shiftKey) {
+        // Shift+arrow = resize
+        if (e.key === 'ArrowLeft')  { cfg.w = Math.max(4,  cfg.w - step); document.getElementById(`bar-${selectedBar}-w`).value = cfg.w; e.preventDefault(); }
+        if (e.key === 'ArrowRight') { cfg.w += step;                       document.getElementById(`bar-${selectedBar}-w`).value = cfg.w; e.preventDefault(); }
+        if (e.key === 'ArrowUp')    { cfg.h = Math.max(10, cfg.h - step);  document.getElementById(`bar-${selectedBar}-h`).value = cfg.h; e.preventDefault(); }
+        if (e.key === 'ArrowDown')  { cfg.h += step;                       document.getElementById(`bar-${selectedBar}-h`).value = cfg.h; e.preventDefault(); }
+    } else {
+        // Plain arrow = reposition
+        if (e.key === 'ArrowLeft')  { cfg.x -= step; document.getElementById(`bar-${selectedBar}-x`).value = cfg.x; e.preventDefault(); }
+        if (e.key === 'ArrowRight') { cfg.x += step; document.getElementById(`bar-${selectedBar}-x`).value = cfg.x; e.preventDefault(); }
+        if (e.key === 'ArrowUp')    { cfg.y -= step; document.getElementById(`bar-${selectedBar}-y`).value = cfg.y; e.preventDefault(); }
+        if (e.key === 'ArrowDown')  { cfg.y += step; document.getElementById(`bar-${selectedBar}-y`).value = cfg.y; e.preventDefault(); }
+    }
+    applyBarOffsets();
+});
+
+// Toggle bar debug panel with B key
+window.addEventListener('keydown', (e) => {
+    if (e.key.toLowerCase() === 'b') {
+        const showing = barDebugPanel.style.display === 'block';
+        barDebugPanel.style.display = showing ? 'none' : 'block';
+        if (!showing) { initBarDebug(); applyBarOffsets(); }
+    }
+});
+
+// Debug menu toggle with D key
+window.addEventListener('keydown', (event) => {
+    if (event.key.toLowerCase() === 'd') {
+        debugMode = !debugMode;
+        debugPanel.style.display = debugMode ? 'block' : 'none';
+    }
+    if (debugMode) {
+        keysPressed[event.key.toLowerCase()] = true;
+        
+        // Switch spotlight with T
+        if (event.key.toLowerCase() === 't') {
+            selectedSpotlight = (selectedSpotlight + 1) % 8;
+            document.getElementById('spotlight-num').textContent = selectedSpotlight + 1;
+        }
+        
+        // Copy position to console with C
+        if (event.key.toLowerCase() === 'c') {
+            const pos = spotlights[selectedSpotlight].position;
+            console.log(`Spotlight ${selectedSpotlight + 1} Position: new THREE.Vector3(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`);
+        }
+        
+        // Adjust speed
+        if (event.key === '1') {
+            debugMoveSpeed = Math.max(0.01, debugMoveSpeed - 0.05);
+        }
+        if (event.key === '2') {
+            debugMoveSpeed = Math.min(1, debugMoveSpeed + 0.05);
+        }
+    }
+});
+
+window.addEventListener('keyup', (event) => {
+    keysPressed[event.key.toLowerCase()] = false;
+});
+
+// Update debug positions every frame
+function updateDebugPositions() {
+    if (!debugMode) return;
+    
+    const spotlight = spotlights[selectedSpotlight];
+    
+    // Movement with arrow keys or WASD
+    if (keysPressed['arrowup'] || keysPressed['w']) spotlight.position.z -= debugMoveSpeed;
+    if (keysPressed['arrowdown'] || keysPressed['s']) spotlight.position.z += debugMoveSpeed;
+    if (keysPressed['arrowleft'] || keysPressed['a']) spotlight.position.x -= debugMoveSpeed;
+    if (keysPressed['arrowright'] || keysPressed['d']) spotlight.position.x += debugMoveSpeed;
+    if (keysPressed['q']) spotlight.position.y -= debugMoveSpeed;
+    if (keysPressed['e']) spotlight.position.y += debugMoveSpeed;
+    
+    // Update target position for spotlight
+    spotlight.target.position.set(spotlight.position.x, 0, spotlight.position.z);
+    
+    // Update display
+    document.getElementById('spot-x').textContent = spotlight.position.x.toFixed(2);
+    document.getElementById('spot-y').textContent = spotlight.position.y.toFixed(2);
+    document.getElementById('spot-z').textContent = spotlight.position.z.toFixed(2);
+}
 
 // Raycaster for mouse clicks
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
+function createSquareOutlineTexture(colorHex, labelText = null) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    const color = `#${colorHex.toString(16).padStart(6, '0')}`;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(5, 5, canvas.width - 10, canvas.height - 10);
+
+    if (labelText) {
+        ctx.fillStyle = color;
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(labelText, canvas.width - 8, 8);
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+}
+
+// Create a camera-facing square overlay sprite
+function createInteractionOverlay(size, color, labelText = null) {
+    const texture = createSquareOutlineTexture(color, labelText);
+    const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(size, size, 1);
+    sprite.renderOrder = 998;
+    sprite.visible = false;
+    scene.add(sprite);
+    return sprite;
+}
+
+const overlayColor = 0x33ff66;
+const fetchInteractionOverlay = createInteractionOverlay(2.2, overlayColor, 'Play fetch');
+const hideSeekInteractionOverlay = createInteractionOverlay(2.8, overlayColor, 'Start hide and seek');
+const dispenserInteractionOverlay = createInteractionOverlay(2.2, overlayColor, 'Click for food');
+
 // Play toy (draggable object)
+let toy = null;
+const toyStartPosition = new THREE.Vector3(0, 0.3, 5); // Original position - in front of creature
+
+// Fallback toy mesh for safety while GLB loads
 const toyGeom = new THREE.BoxGeometry(0.6, 0.4, 0.6);
 const toyMat = new THREE.MeshStandardMaterial({ color: 0xFF1493 });
-const toy = new THREE.Mesh(toyGeom, toyMat);
-const toyStartPosition = new THREE.Vector3(0, 0.3, 5); // Original position - in front of creature
+toy = new THREE.Mesh(toyGeom, toyMat);
 toy.position.copy(toyStartPosition);
 scene.add(toy);
+
+// Replace fallback toy with fetchObject model
+const fetchObjectLoader = new THREE.GLTFLoader();
+fetchObjectLoader.load('assets/models/fetchObject.glb', (gltf) => {
+    const fetchObject = gltf.scene;
+    fetchObject.position.copy(toyStartPosition);
+    fetchObject.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+        }
+    });
+
+    scene.remove(toy);
+    toy = fetchObject;
+    scene.add(toy);
+    console.log('Fetch object loaded');
+}, undefined, (error) => {
+    console.error('Error loading fetchObject.glb:', error);
+});
 
 // Track dragging
 let isDraggingToy = false;
 let toyDragOffset = new THREE.Vector3();
+
+// Food model template (falls back to sphere if load fails)
+let foodTemplate = null;
+const foodLoader = new THREE.GLTFLoader();
+foodLoader.load('assets/models/food.glb', (gltf) => {
+    foodTemplate = gltf.scene;
+    foodTemplate.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+        }
+    });
+    console.log('Food model loaded');
+}, undefined, (error) => {
+    console.warn('Food model load failed, using sphere fallback:', error);
+});
 
 // Multiple hiding spots for hide-and-seek
 const hideSpots = [
@@ -116,26 +461,53 @@ const hideSpots = [
     new THREE.Vector3(5, 0.5, 8)
 ];
 
-// Create visual hide spots
+// Green highlight squares for all hide piles during hide-and-seek
+const hidePileOverlays = hideSpots.map((spot) => {
+    const overlay = createInteractionOverlay(2.4, overlayColor);
+    overlay.position.set(spot.x, 0.06, spot.z);
+    return overlay;
+});
+
+// Hide spot model instances (now visually rendered)
 const hideSpotGroups = [];
-hideSpots.forEach((spotPos, index) => {
-    const hideSpotGroup = new THREE.Group();
-    hideSpotGroup.position.copy(spotPos);
-    hideSpotGroup.position.y = 0; // Position at ground level
-    scene.add(hideSpotGroup);
-    
-    // Hide spot base - larger for easier clicking
-    const hideBaseGeom = new THREE.SphereGeometry(2, 8, 8);
-    const hideBaseMat = new THREE.MeshStandardMaterial({ color: 0x228B22 });
-    const hideBase = new THREE.Mesh(hideBaseGeom, hideBaseMat);
-    hideBase.scale.y = 0.6;
-    hideBase.position.y = 1;
-    hideSpotGroup.add(hideBase);
-    
-    hideSpotGroups.push(hideSpotGroup);
+
+// Load rubbish model and place one at each hide spot position
+const rubbishLoader = new THREE.GLTFLoader();
+rubbishLoader.load('assets/models/rubbish.glb', (gltf) => {
+    const rubbishTemplate = gltf.scene;
+    hideSpots.forEach((spot, index) => {
+        const rubbish = rubbishTemplate.clone(true);
+        rubbish.userData.hideSpotIndex = index;
+        // Keep rubbish pivot at ground level (y = 0)
+        rubbish.position.set(spot.x, 0, spot.z);
+        rubbish.traverse((child) => {
+            if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+                child.userData.hideSpotIndex = index;
+            }
+        });
+        scene.add(rubbish);
+        hideSpotGroups.push(rubbish);
+    });
+    console.log('Rubbish props loaded:', hideSpotGroups.length);
+}, undefined, (error) => {
+    console.error('Error loading rubbish.glb:', error);
 });
 
 let selectedHideSpot = null; // Will be set when hide-and-seek starts
+let selectedHideSpotIndex = -1;
+
+function startHideAndSeek() {
+    creature.actionState = 'playing_hide_and_seek';
+    creature.playSubstate = 'hide_and_seek';
+    creature.isHiding = false;
+    creature.isReturningFromHide = false;
+    creature.atCenter = false;
+    creature.removeTargetIndicator();
+    selectedHideSpotIndex = Math.floor(Math.random() * hideSpots.length);
+    selectedHideSpot = hideSpots[selectedHideSpotIndex];
+}
 
 // Handle mouse clicks and toy dragging
 let mouseDown = false;
@@ -149,7 +521,7 @@ window.addEventListener('mousedown', (event) => {
     raycaster.setFromCamera(mouse, camera);
     
     // Check if toy is clicked
-    const toyIntersects = raycaster.intersectObject(toy);
+    const toyIntersects = toy ? raycaster.intersectObject(toy, true) : [];
     if (toyIntersects.length > 0) {
         isDraggingToy = true;
         // Calculate offset for dragging
@@ -157,57 +529,66 @@ window.addEventListener('mousedown', (event) => {
         return;
     }
     
-    // Check if dispenser is clicked
-    const dispenserIntersects = raycaster.intersectObject(dispenserGroup, true);
-    if (dispenserIntersects.length > 0 && !foodAvailable) {
-        // Dispense food
-        foodAvailable = true;
-        
-        if (foodItem) {
-            scene.remove(foodItem);
+    // Check if dispenser is clicked (click near dispenser position on environment)
+    if (environment && !foodAvailable) {
+        const dispenserIntersects = raycaster.intersectObject(environment, true);
+        if (dispenserIntersects.length > 0) {
+            // Check if click is near the dispenser position
+            const clickPoint = dispenserIntersects[0].point;
+            const distToDispenser = clickPoint.distanceTo(dispenserPosition);
+            if (distToDispenser < 2) {  // Click within 2 units of dispenser
+                // Dispense food
+                foodAvailable = true;
+                
+                if (foodItem) {
+                    scene.remove(foodItem);
+                }
+                
+                // Create food item (use GLB if available, fallback to sphere)
+                if (foodTemplate) {
+                    foodItem = foodTemplate.clone(true);
+                } else {
+                    const foodGeom = new THREE.SphereGeometry(0.3, 8, 8);
+                    const foodMat = new THREE.MeshStandardMaterial({ color: 0xFFD700 });
+                    foodItem = new THREE.Mesh(foodGeom, foodMat);
+                }
+                foodItem.position.copy(dispenserPosition);
+                foodItem.position.y = 1;
+                scene.add(foodItem);
+                return;
+            }
         }
-        
-        // Create food item mesh
-        const foodGeom = new THREE.SphereGeometry(0.3, 8, 8);
-        const foodMat = new THREE.MeshStandardMaterial({ color: 0xFFD700 });
-        foodItem = new THREE.Mesh(foodGeom, foodMat);
-        foodItem.position.copy(dispenserPosition);
-        foodItem.position.y = 1;
-        scene.add(foodItem);
-        return;
     }
     
-    // Check if any hide spot is clicked to trigger hide-and-seek
-    let hideSpotClicked = false;
-    for (let i = 0; i < hideSpotGroups.length; i++) {
-        const hideSpotIntersects = raycaster.intersectObject(hideSpotGroups[i], true);
-        if (hideSpotIntersects.length > 0) {
-            hideSpotClicked = true;
-            break;
-        }
-    }
-    
-    // Check if creature is clicked while bored and at center to trigger hide-and-seek
+    // Check if hide-and-seek start area is clicked while bored and waiting at center
     if (creature.actionState === 'bored' && creature.atCenter) {
+        // Allow clicking anywhere inside the highlighted square area
+        const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const clickOnGround = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(groundPlane, clickOnGround)) {
+            const clickDist = clickOnGround.distanceTo(new THREE.Vector3(creature.mesh.position.x, 0, creature.mesh.position.z));
+            if (clickDist <= 1.4) {
+                startHideAndSeek();
+                return;
+            }
+        }
+
+        // Original creature click still works
         const creatureIntersects = raycaster.intersectObject(creature.mesh);
         if (creatureIntersects.length > 0) {
-            // Trigger hide-and-seek
-            creature.actionState = 'playing_hide_and_seek';
-            creature.playSubstate = 'hide_and_seek';
-            creature.isHiding = false;
-            creature.atCenter = false;
-            creature.removeTargetIndicator();
-            // Randomly select a hide spot
-            selectedHideSpot = hideSpots[Math.floor(Math.random() * hideSpots.length)];
+            startHideAndSeek();
             return;
         }
     }
     
-    // Check if hidden creature is clicked (finding him in hide and seek)
+    // Check if the correct rubbish pile is clicked while creature is hiding
     if (creature.actionState === 'playing_hide_and_seek' && creature.isHiding) {
-        const creatureIntersects = raycaster.intersectObject(creature.mesh);
-        if (creatureIntersects.length > 0) {
-            creature.foundByPlayer = true;
+        const rubbishIntersects = hideSpotGroups.length > 0 ? raycaster.intersectObjects(hideSpotGroups, true) : [];
+        if (rubbishIntersects.length > 0) {
+            const clickedIndex = rubbishIntersects[0].object.userData.hideSpotIndex;
+            if (clickedIndex === selectedHideSpotIndex) {
+                creature.foundByPlayer = true;
+            }
         }
     }
 });
@@ -257,13 +638,29 @@ loader.load('assets/models/Roach.glb', (gltf) => {
     // Hide the cube fallback since model loaded
     cube.visible = false;
     
-    // Set up animation mixer
-    animationMixer = new THREE.AnimationMixer(modelMesh);
+    // Find the SkinnedMesh in the hierarchy (animation target)
+    let skinnedMesh = null;
+    modelMesh.traverse((child) => {
+        if (child.isSkinnedMesh) {
+            skinnedMesh = child;
+        }
+    });
+    
+    // Set up animation mixer on the actual skeleton
+    const mixerTarget = skinnedMesh || modelMesh;
+    animationMixer = new THREE.AnimationMixer(mixerTarget);
     
     // Get animation clips
     const animations = gltf.animations;
+    console.log('Loaded animations:', animations.map(a => a.name));
+    console.log('Number of animations:', animations.length);
+    console.log('Animation clip names:', animations.map(a => `"${a.name}"`).join(', '));
+    
     idleAction = animationMixer.clipAction(THREE.AnimationClip.findByName(animations, 'IDLE'));
     walkAction = animationMixer.clipAction(THREE.AnimationClip.findByName(animations, 'WALK'));
+    
+    console.log('Idle action found:', idleAction !== null);
+    console.log('Walk action found:', walkAction !== null);
     
     // Set up animations
     if (idleAction) {
@@ -271,11 +668,19 @@ loader.load('assets/models/Roach.glb', (gltf) => {
         idleAction.clampWhenFinished = false;
         idleAction.play();
         currentAnimation = 'idle';
+        console.log('Idle animation playing');
+    } else {
+        console.warn('Idle action not found!');
     }
     if (walkAction) {
         walkAction.loop = THREE.LoopRepeat;
         walkAction.clampWhenFinished = false;
+        console.log('Walk action setup complete');
+    } else {
+        console.warn('Walk action not found!');
     }
+}, undefined, (error) => {
+    console.error('Error loading Roach.glb:', error);
 });
 
 // Fallback cube if model doesn't load
@@ -295,7 +700,7 @@ const creature = {
     stoppingDistance: 1.5, // Increased so creature doesn't need exact spot
     bedCloseDistance: 1, // How close to bed before "at bed"
     dispenserCloseDistance: 1.2, // How close to dispenser before "at dispenser"
-    foodCloseDistance: 0.8, // How close to food before eating
+    foodCloseDistance: 1.6, // How close to food before eating
     
     // Animation tracking
     isMoving: false,
@@ -340,9 +745,9 @@ const creature = {
     
     // Stat decay rates (per second)
     decayRates: {
-        hunger: 1,       // Loses 5 hunger per second
-        energy: 1,       // Loses 8 energy per second when moving
-        excitement: 5    // Loses 3 excitement per second
+        hunger: 0.013,       // Loses 5 hunger per second
+        energy: 0.01,       // Loses 8 energy per second when moving
+        excitement: 0.75   // Loses 3 excitement per second
     },
     
     // Ground plane bounds (27 x 20)
@@ -599,20 +1004,9 @@ const creature = {
         this.spawnTargetIndicator();
     },
     
-    // Spawn a visual cube at the target position
+    // Target indicator disabled to keep navigation markers hidden
     spawnTargetIndicator() {
-        // Remove old indicator if it exists
-        if (this.targetIndicator) {
-            scene.remove(this.targetIndicator);
-        }
-        
-        // Create new indicator cube
-        const indicatorGeom = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-        const indicatorMat = new THREE.MeshStandardMaterial({ color: 0x00FF00, emissive: 0x00AA00 });
-        this.targetIndicator = new THREE.Mesh(indicatorGeom, indicatorMat);
-        this.targetIndicator.position.copy(this.targetPosition);
-        this.targetIndicator.position.y = 0.25; // Half height so bottom sits on ground
-        scene.add(this.targetIndicator);
+        this.targetIndicator = null;
     },
     
     // Remove the target indicator cube
@@ -831,6 +1225,91 @@ const creature = {
                 this.pickNewTarget();
             }
         } else if (this.actionState === 'playing_hide_and_seek') {
+
+    // Phase 1: Return to center after being found
+    if (this.isReturningFromHide) {
+        const centerPos = new THREE.Vector3(0, 0.5, 0);
+        this.targetPosition.copy(centerPos);
+        const distanceToCenter = this.mesh.position.distanceTo(centerPos);
+
+        if (distanceToCenter < this.stoppingDistance) {
+            this.isReturningFromHide = false;
+            this.atCenter = true;
+
+            // 50/50: play again or end
+            if (Math.random() < 0.5) {
+                selectedHideSpotIndex = Math.floor(Math.random() * hideSpots.length);
+                selectedHideSpot = hideSpots[selectedHideSpotIndex];
+                this.isHiding = false;
+                this.playingTimer = 0;
+            } else {
+                this.atCenter = false;
+                this.playingTimer = 0;
+                if (Math.random() < 0.5) {
+                    this.actionState = 'bored';
+                    this.stats.excitement = Math.max(0, this.stats.excitement - 10);
+                } else {
+                    this.actionState = 'idle';
+                    this.pickNewTarget();
+                }
+            }
+        } else {
+            this.moveForward(deltaTime);
+        }
+
+    // Phase 2: Walk to center first
+    } else if (!this.atCenter) {
+        const centerPos = new THREE.Vector3(0, 0.5, 0);
+        this.targetPosition.copy(centerPos);
+        const distanceToCenter = this.mesh.position.distanceTo(centerPos);
+
+        if (distanceToCenter < this.stoppingDistance) {
+            this.atCenter = true;
+        } else {
+            this.moveForward(deltaTime);
+            return;
+        }
+
+    // Phase 3: Walk to hide spot
+    } else if (!this.isHiding) {
+        if (selectedHideSpot) {
+            this.targetPosition.copy(selectedHideSpot);
+            const distanceToHide = this.mesh.position.distanceTo(selectedHideSpot);
+
+            if (distanceToHide < this.stoppingDistance + 1) {
+                this.isHiding = true;
+            } else {
+                this.moveForward(deltaTime);
+            }
+        }
+
+    // Phase 4: Hiding — wait to be found
+    } else {
+        this.stats.excitement = this.clampStat(this.stats.excitement + 3 * deltaTime);
+
+        if (this.foundByPlayer) {
+            this.stats.excitement = this.clampStat(this.stats.excitement + 30);
+            this.isHiding = false;
+            this.foundByPlayer = false;
+            this.isReturningFromHide = true; // ← trigger return phase
+            selectedHideSpot = null;         // ← clear so it can't re-trigger
+            selectedHideSpotIndex = -1;
+        }
+    }
+
+    // End play if exhausted or timed out
+    this.playingTimer += deltaTime;
+    if (this.stats.energy <= 20 || this.playingTimer > 40) {
+        this.isHiding = false;
+        this.foundByPlayer = false;
+        this.isReturningFromHide = false;
+        this.atCenter = false;
+        this.playingTimer = 0;
+        selectedHideSpot = null;
+        selectedHideSpotIndex = -1;
+        this.actionState = 'idle';
+        this.pickNewTarget();
+    }
             // Hide and seek gameplay
             if (!this.atCenter) {
                 // First go to center if not there already
@@ -886,7 +1365,8 @@ const creature = {
                         // Randomly choose to play again or end
                         if (Math.random() < 0.5) {
                             // Play again immediately - pick new hide spot
-                            selectedHideSpot = hideSpots[Math.floor(Math.random() * hideSpots.length)];
+                            selectedHideSpotIndex = Math.floor(Math.random() * hideSpots.length);
+                            selectedHideSpot = hideSpots[selectedHideSpotIndex];
                             this.isHiding = false;
                             this.playingTimer = 0;
                             this.atCenter = true; // Stay at center, ready to hide again
@@ -914,6 +1394,7 @@ const creature = {
                 this.atCenter = false;
                 this.playingTimer = 0;
                 selectedHideSpot = null;
+                selectedHideSpotIndex = -1;
                 
                 // End play and go to idle
                 this.actionState = 'idle';
@@ -988,9 +1469,74 @@ function animate() {
     // Update creature movement and stats
     creature.update(deltaTime);
     
+    // Update debug positions if debug mode is active
+    updateDebugPositions();
+    
     // Update animation mixer
     if (animationMixer) {
         animationMixer.update(deltaTime);
+    }
+
+    // Show contextual interaction overlays
+    const isBoredWaiting = creature.actionState === 'bored' && creature.atCenter;
+    if (isBoredWaiting && toy) {
+        fetchInteractionOverlay.visible = true;
+        fetchInteractionOverlay.position.set(toy.position.x, 1.0, toy.position.z);
+
+        hideSeekInteractionOverlay.visible = true;
+        hideSeekInteractionOverlay.position.set(
+            creature.mesh ? creature.mesh.position.x : 0,
+            1.0,
+            creature.mesh ? creature.mesh.position.z : 0
+        );
+    } else {
+        fetchInteractionOverlay.visible = false;
+        hideSeekInteractionOverlay.visible = false;
+    }
+
+    const isWaitingForFood = creature.actionState === 'hungry' && creature.atDispenser && !foodAvailable;
+    if (isWaitingForFood) {
+        dispenserInteractionOverlay.visible = true;
+        dispenserInteractionOverlay.position.set(dispenserPosition.x, 1.0, dispenserPosition.z);
+    } else {
+        dispenserInteractionOverlay.visible = false;
+    }
+
+    const isHidingAndWaiting = creature.actionState === 'playing_hide_and_seek' && creature.isHiding;
+    hidePileOverlays.forEach((overlay, index) => {
+        const hideSpot = hideSpots[index];
+        overlay.position.set(hideSpot.x, 1.0, hideSpot.z);
+        overlay.visible = isHidingAndWaiting;
+    });
+    
+    // Render debug markers if debug mode is active
+    if (debugMode) {
+        // Create temporary debug markers (wireframes to show positions)
+        if (!window.debugMarkers) {
+            window.debugMarkers = {};
+            
+            // Bed marker
+            const bedGeom = new THREE.BoxGeometry(1, 1, 1);
+            const bedMat = new THREE.MeshBasicMaterial({ color: 0x00FF00, wireframe: true });
+            window.debugMarkers.bed = new THREE.Mesh(bedGeom, bedMat);
+            scene.add(window.debugMarkers.bed);
+            
+            // Dispenser marker
+            const dispGeom = new THREE.BoxGeometry(1, 1, 1);
+            const dispMat = new THREE.MeshBasicMaterial({ color: 0xFF0000, wireframe: true });
+            window.debugMarkers.dispenser = new THREE.Mesh(dispGeom, dispMat);
+            scene.add(window.debugMarkers.dispenser);
+        }
+        
+        // Update marker positions
+        window.debugMarkers.bed.position.copy(bedPosition);
+        window.debugMarkers.dispenser.position.copy(dispenserPosition);
+        window.debugMarkers.bed.visible = true;
+        window.debugMarkers.dispenser.visible = true;
+    } else if (window.debugMarkers) {
+        // Hide markers when not in debug mode
+        window.debugMarkers.bed.visible = false;
+        window.debugMarkers.dispenser.visible = false;
     }
     
     // Reapply rotation AFTER mixer to override any animation rotation keyframes
@@ -1007,13 +1553,13 @@ function animate() {
     stateDisplay.className = 'state-badge ' + creature.actionState;
     
     // Update UI stats display
-    document.getElementById('hunger-fill').style.width = creature.stats.hunger + '%';
+    document.getElementById('hunger-fill').style.height = creature.stats.hunger + '%';
     document.getElementById('hunger-value').textContent = Math.round(creature.stats.hunger);
     
-    document.getElementById('energy-fill').style.width = creature.stats.energy + '%';
+    document.getElementById('energy-fill').style.height = creature.stats.energy + '%';
     document.getElementById('energy-value').textContent = Math.round(creature.stats.energy);
     
-    document.getElementById('excitement-fill').style.width = creature.stats.excitement + '%';
+    document.getElementById('excitement-fill').style.height = creature.stats.excitement + '%';
     document.getElementById('excitement-value').textContent = Math.round(creature.stats.excitement);
     
     // Gentle rotation on the creature (skip if using animated model)
