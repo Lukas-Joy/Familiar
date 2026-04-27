@@ -87,73 +87,14 @@ let dispenserPosition = new THREE.Vector3(-9.50, 0.50, -10.10);
 let foodItem = null;
 let foodAvailable = false;
 
-// Debug mode for repositioning spotlights
-let debugMode = false;
+
 let selectedSpotlight = 0; // 0-7 for the 8 spotlights
 
-// Debug menu UI
-function createDebugMenu() {
-    const debugPanel = document.createElement('div');
-    debugPanel.id = 'debug-menu';
-    debugPanel.style.cssText = `
-        position: fixed;
-        top: 10px;
-        right: 10px;
-        background: rgba(0, 0, 0, 0.8);
-        color: #0f0;
-        font-family: monospace;
-        padding: 15px;
-        border: 2px solid #0f0;
-        font-size: 12px;
-        line-height: 1.6;
-        max-width: 280px;
-        z-index: 1000;
-        display: none;
-    `;
-    
-    debugPanel.innerHTML = `
-        <div style="font-weight: bold; margin-bottom: 10px;">DEBUG MENU (D to toggle)</div>
-        <div style="margin-bottom: 8px;">
-            <div>Spotlight: <span id="spotlight-num">1</span>/8</div>
-            <div style="font-size: 10px; color: #0a0;">Press T to switch spotlight</div>
-        </div>
-        <div style="margin-bottom: 8px;">
-            <div>Position:</div>
-            <div>X: <span id="spot-x">0.00</span></div>
-            <div>Y: <span id="spot-y">8.00</span></div>
-            <div>Z: <span id="spot-z">0.00</span></div>
-        </div>
-        <div style="font-size: 10px; color: #0a0; margin-top: 10px;">
-            <div>Controls:</div>
-            <div>Arrow Keys / WASD: Move X/Z</div>
-            <div>Q/E: Move Y up/down</div>
-            <div>1/2: Adjust speed</div>
-            <div>C: Copy position to console</div>
-        </div>
-    `;
-    
-    document.body.appendChild(debugPanel);
-    return debugPanel;
-}
-
-let debugPanel = createDebugMenu();
-let debugMoveSpeed = 0.1;
-let keysPressed = {}
 
 document.getElementById('stats-panel').style.display = 'none';
 // ─── UI Overlay ───────────────────────────────────────────────────────────────
 const uiOverlay = document.createElement('img');
-uiOverlay.src = 'assets/UI.png';
-uiOverlay.id = 'ui-overlay';
-uiOverlay.style.cssText = `
-    position: fixed;
-    pointer-events: none;
-    z-index: 50;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    object-fit: cover;
-`;
-document.body.appendChild(uiOverlay);
+// UI.png overlay removed as requested
 
 // ─── Bar position + size state ────────────────────────────────────────────────
 const barConfigs = {
@@ -161,15 +102,6 @@ const barConfigs = {
     energy:     { el: null, fillEl: null, x: 0, y: 0, w: 20, h: 120, label: 'Energy Bar' },
     excitement: { el: null, fillEl: null, x: 0, y: 0, w: 20, h: 120, label: 'Excitement Bar' },
 };
-
-function initBarDebug() {
-    barConfigs.hunger.el        = document.getElementById('hunger-fill')?.closest('.stat-bar') || document.getElementById('hunger-fill')?.parentElement;
-    barConfigs.energy.el        = document.getElementById('energy-fill')?.closest('.stat-bar')  || document.getElementById('energy-fill')?.parentElement;
-    barConfigs.excitement.el    = document.getElementById('excitement-fill')?.closest('.stat-bar') || document.getElementById('excitement-fill')?.parentElement;
-    barConfigs.hunger.fillEl    = document.getElementById('hunger-fill');
-    barConfigs.energy.fillEl    = document.getElementById('energy-fill');
-    barConfigs.excitement.fillEl= document.getElementById('excitement-fill');
-}
 
 function applyBarOffsets() {
     Object.values(barConfigs).forEach(cfg => {
@@ -181,52 +113,6 @@ function applyBarOffsets() {
         cfg.el.style.height   = cfg.h + 'px';
     });
 }
-
-// ─── Bar debug panel ──────────────────────────────────────────────────────────
-const barDebugPanel = document.createElement('div');
-barDebugPanel.id = 'bar-debug-panel';
-barDebugPanel.style.cssText = `
-    position: fixed;
-    bottom: 10px; right: 10px;
-    background: rgba(0,0,0,0.85);
-    color: #0ff;
-    font-family: monospace;
-    font-size: 11px;
-    padding: 12px 16px;
-    border: 1px solid #0ff;
-    z-index: 2000;
-    line-height: 1.8;
-    display: none;
-    min-width: 300px;
-`;
-
-barDebugPanel.innerHTML = `
-    <div style="font-weight:bold;margin-bottom:8px;">BAR DEBUG (B to toggle)</div>
-    ${['hunger','energy','excitement'].map(k => `
-    <div style="margin-bottom:8px;border-top:1px solid #044;padding-top:6px;">
-        <span style="color:#ff0;">${barConfigs[k].label}</span><br>
-        <span style="color:#888;font-size:10px;">Position</span><br>
-        X: <input id="bar-${k}-x" type="number" value="0" step="1"
-            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;">
-        Y: <input id="bar-${k}-y" type="number" value="0" step="1"
-            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;"><br>
-        <span style="color:#888;font-size:10px;">Size</span><br>
-        W: <input id="bar-${k}-w" type="number" value="20" step="1" min="4"
-            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;">
-        H: <input id="bar-${k}-h" type="number" value="120" step="1" min="10"
-            style="width:50px;background:#111;color:#0ff;border:1px solid #0ff;padding:1px 3px;">
-        <button onclick="resetBar('${k}')"
-            style="background:#300;color:#f66;border:1px solid #f66;
-                   padding:1px 5px;cursor:pointer;margin-left:4px;">↺</button>
-    </div>`).join('')}
-    <div style="color:#888;font-size:10px;margin-top:6px;">
-        Arrow keys nudge selected bar position<br>
-        Shift+Arrow nudges size (W/H)<br>
-        Click any input to select that bar
-    </div>
-    <div style="margin-top:6px;">Selected: <span id="bar-selected-label" style="color:#ff0;">—</span></div>
-`;
-document.body.appendChild(barDebugPanel);
 
 let selectedBar = null;
 
@@ -256,98 +142,13 @@ window.resetBar = function(k) {
     applyBarOffsets();
 };
 
-// Arrow keys: plain = nudge position, Shift = nudge size
-window.addEventListener('keydown', (e) => {
-    if (barDebugPanel.style.display === 'none') return;
-    if (!selectedBar) return;
-    // Don't steal keys while typing in an input
-    if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
 
-    const step = 1;
-    const cfg = barConfigs[selectedBar];
 
-    if (e.shiftKey) {
-        // Shift+arrow = resize
-        if (e.key === 'ArrowLeft')  { cfg.w = Math.max(4,  cfg.w - step); document.getElementById(`bar-${selectedBar}-w`).value = cfg.w; e.preventDefault(); }
-        if (e.key === 'ArrowRight') { cfg.w += step;                       document.getElementById(`bar-${selectedBar}-w`).value = cfg.w; e.preventDefault(); }
-        if (e.key === 'ArrowUp')    { cfg.h = Math.max(10, cfg.h - step);  document.getElementById(`bar-${selectedBar}-h`).value = cfg.h; e.preventDefault(); }
-        if (e.key === 'ArrowDown')  { cfg.h += step;                       document.getElementById(`bar-${selectedBar}-h`).value = cfg.h; e.preventDefault(); }
-    } else {
-        // Plain arrow = reposition
-        if (e.key === 'ArrowLeft')  { cfg.x -= step; document.getElementById(`bar-${selectedBar}-x`).value = cfg.x; e.preventDefault(); }
-        if (e.key === 'ArrowRight') { cfg.x += step; document.getElementById(`bar-${selectedBar}-x`).value = cfg.x; e.preventDefault(); }
-        if (e.key === 'ArrowUp')    { cfg.y -= step; document.getElementById(`bar-${selectedBar}-y`).value = cfg.y; e.preventDefault(); }
-        if (e.key === 'ArrowDown')  { cfg.y += step; document.getElementById(`bar-${selectedBar}-y`).value = cfg.y; e.preventDefault(); }
-    }
-    applyBarOffsets();
-});
 
-// Toggle bar debug panel with B key
-window.addEventListener('keydown', (e) => {
-    if (e.key.toLowerCase() === 'b') {
-        const showing = barDebugPanel.style.display === 'block';
-        barDebugPanel.style.display = showing ? 'none' : 'block';
-        if (!showing) { initBarDebug(); applyBarOffsets(); }
-    }
-});
-
-// Debug menu toggle with D key
-window.addEventListener('keydown', (event) => {
-    if (event.key.toLowerCase() === 'd') {
-        debugMode = !debugMode;
-        debugPanel.style.display = debugMode ? 'block' : 'none';
-    }
-    if (debugMode) {
-        keysPressed[event.key.toLowerCase()] = true;
-        
-        // Switch spotlight with T
-        if (event.key.toLowerCase() === 't') {
-            selectedSpotlight = (selectedSpotlight + 1) % 8;
-            document.getElementById('spotlight-num').textContent = selectedSpotlight + 1;
-        }
-        
-        // Copy position to console with C
-        if (event.key.toLowerCase() === 'c') {
-            const pos = spotlights[selectedSpotlight].position;
-            console.log(`Spotlight ${selectedSpotlight + 1} Position: new THREE.Vector3(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)})`);
-        }
-        
-        // Adjust speed
-        if (event.key === '1') {
-            debugMoveSpeed = Math.max(0.01, debugMoveSpeed - 0.05);
-        }
-        if (event.key === '2') {
-            debugMoveSpeed = Math.min(1, debugMoveSpeed + 0.05);
-        }
-    }
-});
 
 window.addEventListener('keyup', (event) => {
     keysPressed[event.key.toLowerCase()] = false;
 });
-
-// Update debug positions every frame
-function updateDebugPositions() {
-    if (!debugMode) return;
-    
-    const spotlight = spotlights[selectedSpotlight];
-    
-    // Movement with arrow keys or WASD
-    if (keysPressed['arrowup'] || keysPressed['w']) spotlight.position.z -= debugMoveSpeed;
-    if (keysPressed['arrowdown'] || keysPressed['s']) spotlight.position.z += debugMoveSpeed;
-    if (keysPressed['arrowleft'] || keysPressed['a']) spotlight.position.x -= debugMoveSpeed;
-    if (keysPressed['arrowright'] || keysPressed['d']) spotlight.position.x += debugMoveSpeed;
-    if (keysPressed['q']) spotlight.position.y -= debugMoveSpeed;
-    if (keysPressed['e']) spotlight.position.y += debugMoveSpeed;
-    
-    // Update target position for spotlight
-    spotlight.target.position.set(spotlight.position.x, 0, spotlight.position.z);
-    
-    // Update display
-    document.getElementById('spot-x').textContent = spotlight.position.x.toFixed(2);
-    document.getElementById('spot-y').textContent = spotlight.position.y.toFixed(2);
-    document.getElementById('spot-z').textContent = spotlight.position.z.toFixed(2);
-}
 
 // Raycaster for mouse clicks
 const raycaster = new THREE.Raycaster();
@@ -497,6 +298,7 @@ rubbishLoader.load('assets/models/rubbish.glb', (gltf) => {
 
 let selectedHideSpot = null; // Will be set when hide-and-seek starts
 let selectedHideSpotIndex = -1;
+let selectedHideSpotMesh = null; // The actual rubbish mesh to hide in
 
 function startHideAndSeek() {
     creature.actionState = 'playing_hide_and_seek';
@@ -507,6 +309,7 @@ function startHideAndSeek() {
     creature.removeTargetIndicator();
     selectedHideSpotIndex = Math.floor(Math.random() * hideSpots.length);
     selectedHideSpot = hideSpots[selectedHideSpotIndex];
+    selectedHideSpotMesh = hideSpotGroups[selectedHideSpotIndex] || null;
 }
 
 // Handle mouse clicks and toy dragging
@@ -1272,11 +1075,28 @@ const creature = {
 
     // Phase 3: Walk to hide spot
     } else if (!this.isHiding) {
-        if (selectedHideSpot) {
+        if (selectedHideSpotMesh) {
+            // Move to the center of the rubbish pile's bounding box, with a downward Y offset
+            const bbox = new THREE.Box3().setFromObject(selectedHideSpotMesh);
+            const bboxCenter = new THREE.Vector3();
+            bbox.getCenter(bboxCenter);
+            // Lower the Y position so the roach is visually inside the pile
+            bboxCenter.y -= 0.25; // Adjust this value as needed for your model
+            this.targetPosition.copy(bboxCenter);
+            const distanceToHide = this.mesh.position.distanceTo(bboxCenter);
+            if (distanceToHide < this.stoppingDistance + 0.2) {
+                // Snap exactly inside the pile for visual accuracy
+                this.mesh.position.copy(bboxCenter);
+                this.isHiding = true;
+            } else {
+                this.moveForward(deltaTime);
+            }
+        } else if (selectedHideSpot) {
+            // Fallback to old behavior if mesh missing
             this.targetPosition.copy(selectedHideSpot);
             const distanceToHide = this.mesh.position.distanceTo(selectedHideSpot);
-
-            if (distanceToHide < this.stoppingDistance + 1) {
+            if (distanceToHide < this.stoppingDistance + 0.2) {
+                this.mesh.position.copy(selectedHideSpot);
                 this.isHiding = true;
             } else {
                 this.moveForward(deltaTime);
@@ -1294,6 +1114,7 @@ const creature = {
             this.isReturningFromHide = true; // ← trigger return phase
             selectedHideSpot = null;         // ← clear so it can't re-trigger
             selectedHideSpotIndex = -1;
+            selectedHideSpotMesh = null;
         }
     }
 
@@ -1469,8 +1290,6 @@ function animate() {
     // Update creature movement and stats
     creature.update(deltaTime);
     
-    // Update debug positions if debug mode is active
-    updateDebugPositions();
     
     // Update animation mixer
     if (animationMixer) {
@@ -1508,36 +1327,6 @@ function animate() {
         overlay.position.set(hideSpot.x, 1.0, hideSpot.z);
         overlay.visible = isHidingAndWaiting;
     });
-    
-    // Render debug markers if debug mode is active
-    if (debugMode) {
-        // Create temporary debug markers (wireframes to show positions)
-        if (!window.debugMarkers) {
-            window.debugMarkers = {};
-            
-            // Bed marker
-            const bedGeom = new THREE.BoxGeometry(1, 1, 1);
-            const bedMat = new THREE.MeshBasicMaterial({ color: 0x00FF00, wireframe: true });
-            window.debugMarkers.bed = new THREE.Mesh(bedGeom, bedMat);
-            scene.add(window.debugMarkers.bed);
-            
-            // Dispenser marker
-            const dispGeom = new THREE.BoxGeometry(1, 1, 1);
-            const dispMat = new THREE.MeshBasicMaterial({ color: 0xFF0000, wireframe: true });
-            window.debugMarkers.dispenser = new THREE.Mesh(dispGeom, dispMat);
-            scene.add(window.debugMarkers.dispenser);
-        }
-        
-        // Update marker positions
-        window.debugMarkers.bed.position.copy(bedPosition);
-        window.debugMarkers.dispenser.position.copy(dispenserPosition);
-        window.debugMarkers.bed.visible = true;
-        window.debugMarkers.dispenser.visible = true;
-    } else if (window.debugMarkers) {
-        // Hide markers when not in debug mode
-        window.debugMarkers.bed.visible = false;
-        window.debugMarkers.dispenser.visible = false;
-    }
     
     // Reapply rotation AFTER mixer to override any animation rotation keyframes
     creature.finalizeRotation();
