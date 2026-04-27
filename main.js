@@ -76,6 +76,9 @@ for (let i = 0; i < 8; i++) {
     spotlight.position.copy(spotlightPositions[i]);
     spotlight.target.position.set(spotlight.position.x, 0, spotlight.position.z);
     spotlight.castShadow = true;
+    // Keep base intensity so we can modulate it by ambient brightness later
+    spotlight.userData = spotlight.userData || {};
+    spotlight.userData.baseIntensity = 0.4;
     scene.add(spotlight);
     scene.add(spotlight.target);
     spotlights.push(spotlight);
@@ -92,6 +95,297 @@ let selectedSpotlight = 0; // 0-7 for the 8 spotlights
 
 
 document.getElementById('stats-panel').style.display = 'none';
+// --- Persistent stats (localStorage) and ambient brightness handling ---
+const STORAGE_KEY_STATS = 'familiar_stats';
+const STORAGE_KEY_TS = 'familiar_stats_ts';
+// Mirror of creature.decayRates for applying decay on load
+const STAT_DECAY_RATES = { hunger: 0.013, energy: 0.01, excitement: 0.75 };
+window._loadedStats = null;
+
+function loadStatsFromStorage() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY_STATS);
+        const tsRaw = localStorage.getItem(STORAGE_KEY_TS);
+        if (!raw) return;
+        const stats = JSON.parse(raw);
+        const ts = tsRaw ? parseInt(tsRaw, 10) : NaN;
+        if (!isNaN(ts)) {
+            const now = Date.now();
+            const elapsed = Math.max(0, (now - ts) / 1000); // seconds
+            // Apply crude decay over elapsed seconds using same rates defined above
+            stats.hunger = Math.max(0, Math.min(100, stats.hunger - STAT_DECAY_RATES.hunger * elapsed));
+            stats.energy = Math.max(0, Math.min(100, stats.energy - STAT_DECAY_RATES.energy * elapsed));
+            stats.excitement = Math.max(0, Math.min(100, stats.excitement - STAT_DECAY_RATES.excitement * elapsed));
+        }
+        window._loadedStats = stats;
+        console.log('Loaded persisted stats (after decay):', stats);
+    } catch (e) {
+        console.warn('Failed to load stats from storage', e);
+    }
+}
+
+function saveStatsToStorage() {
+    try {
+        const stats = (typeof creature !== 'undefined' && creature.stats) ? creature.stats : window._loadedStats;
+        if (!stats) return;
+        localStorage.setItem(STORAGE_KEY_STATS, JSON.stringify(stats));
+        localStorage.setItem(STORAGE_KEY_TS, Date.now().toString());
+    } catch (e) {
+        console.warn('Failed to save stats to storage', e);
+    }
+}
+
+// Load persisted stats now (will be applied to creature when it's created)
+loadStatsFromStorage();
+
+// Autosave periodically and on unload
+setInterval(() => saveStatsToStorage(), 5000);
+window.addEventListener('beforeunload', () => saveStatsToStorage());
+
+// Ambient webcam brightness sampling to modulate lights and force sleep when too bright
+// Brightness & webcam config and state (debuggable)
+window.currentAmbientBrightness = 0; // 0..1
+window.isTooBright = false;
+window.webcamEnabled = true;
+window._webcamStream = null;
+window._webcamVideo = null;
+window._webcamCanvas = null;
+window._webcamCtx = null;
+window._disableAutoExposureRequested = true;
+window._exposureLockState = 'auto';
+window.setWebcamStatus = function () {};
+window.setExposureStatus = function (s) { window._exposureLockState = s; };
+window.brightnessDebugConfig = {
+    threshold: 0.4, // above this, keep roach sleeping
+    minFactor: 0.15,
+    maxFactor: 2.0
+};
+
+function startWebcamSampling() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.reject(new Error('getUserMedia unavailable'));
+    if (window._webcamStream) return Promise.resolve();
+
+    const video = document.createElement('video');
+    video.autoplay = true; video.muted = true; video.playsInline = true; video.style.display = 'none';
+    document.body.appendChild(video);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    return navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+        .then((stream) => {
+            window._webcamStream = stream;
+            window._webcamVideo = video;
+            window._webcamCanvas = canvas;
+            window._webcamCtx = ctx;
+            video.srcObject = stream;
+
+            // Expose the active video track for applying manual constraints
+            try {
+                const track = stream.getVideoTracks()[0];
+                window._webcamTrack = track;
+                // Automatically request manual exposure lock when webcam starts.
+                if (window._disableAutoExposureRequested) {
+                    if (typeof setExposureStatus === 'function') setExposureStatus('pending');
+                    tryDisableAutoExposure(track).catch(err => console.warn('Failed to lock exposure:', err));
+                } else if (typeof setExposureStatus === 'function') {
+                    setExposureStatus('off');
+                }
+            } catch (e) {
+                console.warn('No video track available for exposure control', e);
+                if (typeof setExposureStatus === 'function') setExposureStatus('failed');
+            }
+
+            // Wait for metadata so we know the natural video size
+            return new Promise((resolve) => {
+                function onMeta() {
+                    try {
+                        // Choose a reasonable sampling resolution to keep performance good
+                        const vidW = video.videoWidth || 320;
+                        const vidH = video.videoHeight || 240;
+                        // Downscale if very large; target ~160px height for sampling
+                        const targetH = Math.min(160, vidH);
+                        const scale = targetH / vidH;
+                        const sampleW = Math.max(16, Math.round(vidW * scale));
+                        const sampleH = Math.max(16, Math.round(vidH * scale));
+                        window._webcamSampleW = sampleW;
+                        window._webcamSampleH = sampleH;
+                        canvas.width = sampleW;
+                        canvas.height = sampleH;
+                    } catch (e) {
+                        // fallback sizes
+                        window._webcamSampleW = 160;
+                        window._webcamSampleH = 120;
+                        canvas.width = 160; canvas.height = 120;
+                    }
+
+                    const playPromise = video.play && video.play();
+                    if (playPromise && typeof playPromise.then === 'function') {
+                        playPromise.then(() => {
+                            console.log('Webcam video playing');
+                            if (typeof setWebcamStatus === 'function') setWebcamStatus('running');
+                            requestAnimationFrame(webcamSampleLoop);
+                            resolve();
+                        }).catch(() => {
+                            // Even if play() rejects (autoplay policies), sampling can still work once frames arrive
+                            console.log('Video play() rejected; starting sampling loop');
+                            if (typeof setWebcamStatus === 'function') setWebcamStatus('running (no-autoplay)');
+                            requestAnimationFrame(webcamSampleLoop);
+                            resolve();
+                        });
+                    } else {
+                        requestAnimationFrame(webcamSampleLoop);
+                        if (typeof setWebcamStatus === 'function') setWebcamStatus('running');
+                        resolve();
+                    }
+
+                    video.removeEventListener('loadedmetadata', onMeta);
+                }
+                if (video.readyState >= 1) {
+                    onMeta();
+                } else {
+                    video.addEventListener('loadedmetadata', onMeta);
+                }
+            });
+        });
+}
+
+function stopWebcamSampling() {
+    try {
+        if (window._webcamStream) {
+            window._webcamStream.getTracks().forEach(t => t.stop());
+            window._webcamStream = null;
+        }
+        if (window._webcamVideo) {
+            window._webcamVideo.srcObject = null;
+            window._webcamVideo.remove();
+            window._webcamVideo = null;
+        }
+        if (window._webcamCanvas) {
+            window._webcamCanvas.remove();
+            window._webcamCanvas = null;
+            window._webcamCtx = null;
+        }
+        window._webcamTrack = null;
+        if (typeof setExposureStatus === 'function') setExposureStatus('off');
+        if (typeof setWebcamStatus === 'function') setWebcamStatus('stopped');
+    } catch (e) { console.warn('Error stopping webcam', e); }
+}
+
+function webcamSampleLoop() {
+    const video = window._webcamVideo;
+    const ctx = window._webcamCtx;
+    const canvas = window._webcamCanvas;
+    if (!video || !ctx || !canvas) return;
+
+    // Use previously computed sample size (set during loadedmetadata)
+    const w = window._webcamSampleW || canvas.width || 160;
+    const h = window._webcamSampleH || canvas.height || 120;
+
+    try {
+        // Draw current video frame scaled to sampling canvas
+        ctx.drawImage(video, 0, 0, w, h);
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const data = imageData.data;
+        let totalLum = 0;
+        let pxCount = data.length / 4;
+        for (let i = 0; i < data.length; i += 4) {
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            // Perceptual luminance (common weights)
+            const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+            totalLum += lum;
+        }
+        const avg = (pxCount > 0) ? (totalLum / pxCount) : 0;
+        const norm = Math.max(0, Math.min(1, avg / 255));
+        window.currentAmbientBrightness = norm;
+
+        // Modulate spotlights intensity by brightness using debug config
+        const cfg = window.brightnessDebugConfig;
+        const factor = cfg.minFactor + norm * (cfg.maxFactor - cfg.minFactor);
+        spotlights.forEach(s => {
+            const base = (s.userData && s.userData.baseIntensity) ? s.userData.baseIntensity : 0.4;
+            s.intensity = Math.max(0.01, Math.min(4, base * factor));
+        });
+
+        const wasTooBright = window.isTooBright;
+        window.isTooBright = norm > window.brightnessDebugConfig.threshold;
+        if (window.isTooBright && !wasTooBright) console.log('Environment bright — enforcing sleep state');
+        if (!window.isTooBright && wasTooBright) console.log('Environment dim — resuming normal behavior');
+    } catch (e) {
+        // getImageData may throw if canvas not ready; ignore and continue
+        console.warn('webcamSampleLoop error (will retry):', e);
+    }
+
+    if (window._webcamStream) requestAnimationFrame(webcamSampleLoop);
+}
+
+// Try to set manual exposure on the provided MediaStreamTrack (best-effort)
+async function tryDisableAutoExposure(track) {
+    if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') {
+        throw new Error('Track or constraint APIs not available');
+    }
+    const caps = track.getCapabilities();
+    const adv = [];
+
+    // Many browsers don't expose exposure controls; handle gracefully
+    if (caps.exposureMode && Array.isArray(caps.exposureMode) && caps.exposureMode.includes('manual')) {
+        adv.push({ exposureMode: 'manual' });
+    }
+    // If exposureTime is available, choose a mid value or clamp to a reasonable number
+    if (caps.exposureTime) {
+        const min = caps.exposureTime.min || 1;
+        const max = caps.exposureTime.max || min;
+        const chosen = Math.min(max, Math.max(min, Math.round((min + max) / 2)));
+        adv.push({ exposureTime: chosen });
+    }
+    // Some devices use exposureCompensation instead
+    if (caps.exposureCompensation) {
+        const min = caps.exposureCompensation.min || -2;
+        const max = caps.exposureCompensation.max || 2;
+        const chosen = Math.min(max, Math.max(min, 0));
+        adv.push({ exposureCompensation: chosen });
+    }
+
+    if (adv.length === 0) {
+        throw new Error('No manual exposure capability detected');
+    }
+
+    try {
+        await track.applyConstraints({ advanced: adv });
+        if (typeof setExposureStatus === 'function') setExposureStatus('locked');
+        return true;
+    } catch (e) {
+        if (typeof setExposureStatus === 'function') setExposureStatus('failed');
+        throw e;
+    }
+}
+
+// Helper to clear manual constraints (best-effort)
+async function clearExposureLock(track) {
+    if (!track || typeof track.applyConstraints !== 'function') return;
+    try {
+        // Clear advanced constraints by applying an empty set; browsers may ignore
+        await track.applyConstraints({});
+        if (typeof setExposureStatus === 'function') setExposureStatus('off');
+    } catch (e) {
+        console.warn('Failed to clear exposure constraints', e);
+    }
+}
+
+// Start sampling if enabled
+if (window.webcamEnabled) {
+    // Only attempt getUserMedia on secure contexts (or localhost)
+    const isSecureContext = (location.protocol === 'https:') || (location.hostname === 'localhost');
+    if (!isSecureContext) {
+        console.warn('Webcam sampling requires a secure context (HTTPS or localhost).');
+        if (typeof setWebcamStatus === 'function') setWebcamStatus('insecure');
+    } else {
+        startWebcamSampling().catch((err) => {
+            console.warn('Webcam brightness sampling unavailable:', err);
+            if (typeof setWebcamStatus === 'function') setWebcamStatus('error');
+        });
+    }
+}
+
 // ─── UI Overlay ───────────────────────────────────────────────────────────────
 const uiOverlay = document.createElement('img');
 // UI.png overlay removed as requested
@@ -179,6 +473,26 @@ function createSquareOutlineTexture(colorHex, labelText = null) {
     return texture;
 }
 
+function createTextTexture(colorHex, text) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    const color = `#${colorHex.toString(16).padStart(6, '0')}`;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = color;
+    // Add generous padding so glyphs never clip at texture edges.
+    ctx.font = 'bold 132px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 6);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+}
+
 // Create a camera-facing square overlay sprite
 function createInteractionOverlay(size, color, labelText = null) {
     const texture = createSquareOutlineTexture(color, labelText);
@@ -197,10 +511,28 @@ function createInteractionOverlay(size, color, labelText = null) {
     return sprite;
 }
 
+function createTextOverlay(size, color, text) {
+    const texture = createTextTexture(color, text);
+    const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(size, size * 0.5, 1);
+    sprite.renderOrder = 998;
+    sprite.visible = false;
+    scene.add(sprite);
+    return sprite;
+}
+
 const overlayColor = 0x33ff66;
 const fetchInteractionOverlay = createInteractionOverlay(2.2, overlayColor, 'Play fetch');
 const hideSeekInteractionOverlay = createInteractionOverlay(2.8, overlayColor, 'Start hide and seek');
 const dispenserInteractionOverlay = createInteractionOverlay(2.2, overlayColor, 'Click for food');
+const sleepZzzOverlay = createTextOverlay(1.9, overlayColor, 'ZZZ');
 
 // Play toy (draggable object)
 let toy = null;
@@ -540,17 +872,17 @@ const creature = {
     hasToy: false, // For fetch - does creature have toy
     
     // Stats (0-100 range)
-    stats: {
+    stats: (window._loadedStats ? window._loadedStats : {
         hunger: 50,      // 0 = starving, 100 = full
         energy: 75,      // 0 = exhausted, 100 = energised
         excitement: 50   // 0 = bored, 100 = excited
-    },
+    }),
     
     // Stat decay rates (per second)
     decayRates: {
-        hunger: 0.013,       // Loses 5 hunger per second
-        energy: 0.01,       // Loses 8 energy per second when moving
-        excitement: 0.75   // Loses 3 excitement per second
+        hunger: 0.008,     // Loses 5 hunger per second
+        energy: 0.005,       // Loses 8 energy per second when moving
+        excitement: 0.15   // Loses 3 excitement per second
     },
     
     // Ground plane bounds (27 x 20)
@@ -613,6 +945,11 @@ const creature = {
     // Update model rotation to face the target direction with turn rate limiting
     updateRotation(deltaTime) {
         if (!this.mesh) return;
+        // Prevent rotation updates while sleeping to avoid spinning
+        if (this.actionState === 'sleeping') {
+            this.mesh.rotation.y = this.currentRotationY;
+            return;
+        }
         
         const direction = new THREE.Vector3().subVectors(this.targetPosition, this.mesh.position);
         const distance = direction.length();
@@ -684,6 +1021,9 @@ const creature = {
     },
     
     evaluateState() {
+        // If ambient brightness is too high, force going to bed (tired) so the creature walks to bed
+        if (window.isTooBright) return 'tired';
+
         // If currently sleeping, stay sleeping until fully rested
         if (this.actionState === 'sleeping') {
             return 'sleeping';
@@ -878,6 +1218,8 @@ const creature = {
         }
         
         // Handle movement based on state
+        
+
         if (this.actionState === 'tired') {
             // Pathfind to bed
             if (!this.atBed) {
@@ -1277,6 +1619,24 @@ window.addEventListener('resize', () => {
     renderer.setSize(newWindowWidth, newWindowHeight);
 });
 
+// Page-focus excitement boost (gives small excitement when user focuses the page)
+window._lastFocusBoost = 0;
+const FOCUS_BOOST_AMOUNT = 5; // excitement points
+const FOCUS_BOOST_COOLDOWN = 5000; // ms
+function tryApplyFocusBoost() {
+    const now = Date.now();
+    if (now - window._lastFocusBoost < FOCUS_BOOST_COOLDOWN) return;
+    window._lastFocusBoost = now;
+    if (typeof creature !== 'undefined' && creature.stats) {
+        creature.stats.excitement = creature.clampStat(creature.stats.excitement + FOCUS_BOOST_AMOUNT);
+        console.log('Focus boost applied: +', FOCUS_BOOST_AMOUNT);
+    }
+}
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') tryApplyFocusBoost();
+});
+window.addEventListener('focus', () => tryApplyFocusBoost());
+
 // Animation loop
 function animate() {
     requestAnimationFrame(animate);
@@ -1319,6 +1679,14 @@ function animate() {
         dispenserInteractionOverlay.position.set(dispenserPosition.x, 1.0, dispenserPosition.z);
     } else {
         dispenserInteractionOverlay.visible = false;
+    }
+
+    const isSleeping = creature.actionState === 'sleeping';
+    if (isSleeping) {
+        sleepZzzOverlay.visible = true;
+        sleepZzzOverlay.position.set(bedPosition.x, bedPosition.y + 1.0, bedPosition.z);
+    } else {
+        sleepZzzOverlay.visible = false;
     }
 
     const isHidingAndWaiting = creature.actionState === 'playing_hide_and_seek' && creature.isHiding;
